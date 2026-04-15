@@ -1,0 +1,14 @@
+.conda/
+
+*.onnx
+*.onnx.data
+
+__pycache__/
+*.pyc
+*.pyo
+
+test_videos/*
+!test_videos/.gitkeep
+
+outputs/*
+!outputs/.gitkeep
