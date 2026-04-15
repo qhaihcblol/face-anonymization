@@ -28,13 +28,13 @@ export function SiteHeader() {
             variant="ghost"
             className="text-cyan-900 hover:bg-cyan-500/10 hover:text-cyan-950 dark:text-cyan-100 dark:hover:bg-cyan-500/15 dark:hover:text-cyan-50"
           >
-            <Link href="/auth/login">Đăng nhập</Link>
+            <Link href="/auth/login">Sign In</Link>
           </Button>
           <Button
             asChild
             className="bg-cyan-400 text-cyan-950 shadow-[0_0_28px_-10px_rgba(34,211,238,0.9)] hover:bg-cyan-300"
           >
-            <Link href="/auth/register">Đăng ký</Link>
+            <Link href="/auth/register">Register</Link>
           </Button>
         </div>
       </div>

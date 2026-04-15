@@ -15,21 +15,21 @@ import { SiteHeader } from '@/components/faceguard/site-header'
 const features = [
   {
     icon: EyeOff,
-    title: 'Ẩn danh tính thông minh',
+    title: 'Adaptive Identity Masking',
     description:
-      'Tự động làm mờ hoặc che mặt theo từng khung hình, giữ độ ổn định cao khi đối tượng di chuyển nhanh.',
+      'Automatically blur or mask faces frame by frame while maintaining stable tracking when subjects move quickly.',
   },
   {
     icon: Radar,
     title: 'Real-time Monitoring',
     description:
-      'Theo dõi luồng camera trực tiếp với độ trễ thấp, phát hiện khuôn mặt liên tục và phản hồi tức thời.',
+      'Process live camera feeds with low latency, continuous face detection, and immediate privacy response.',
   },
   {
     icon: FileCheck2,
-    title: 'Chuẩn hóa bảo mật',
+    title: 'Security-First Audit Trails',
     description:
-      'Lưu dấu vết xử lý rõ ràng cho từng phiên video, hỗ trợ kiểm tra nội bộ và yêu cầu tuân thủ.',
+      'Keep clear processing logs for every video session to support internal reviews and compliance workflows.',
   },
 ]
 
@@ -53,13 +53,13 @@ export function HomePage() {
               Cyber Vision Security
             </p>
             <h1 className="text-balance text-4xl leading-tight font-semibold tracking-tight sm:text-5xl lg:text-6xl">
-              FaceGuard AI bảo vệ danh tính con người trong video và luồng
-              real-time
+              FaceGuard AI protects human identity across video and real-time
+              streams
             </h1>
             <p className="max-w-2xl text-pretty text-base text-muted-foreground sm:text-lg">
-              Hệ thống tập trung vào quyền riêng tư hình ảnh: phát hiện khuôn
-              mặt theo thời gian thực, che danh tính linh hoạt và đảm bảo dữ
-              liệu đầu ra sẵn sàng cho vận hành doanh nghiệp.
+              The platform is built for visual privacy operations: detect faces
+              in real time, apply dynamic anonymization policies, and deliver
+              secure output ready for enterprise workflows.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Button
@@ -68,7 +68,7 @@ export function HomePage() {
                 className="bg-cyan-400 text-cyan-950 hover:bg-cyan-300"
               >
                 <Link href="/auth/register">
-                  Khởi tạo tài khoản
+                  Create Account
                   <ArrowRight className="size-4" />
                 </Link>
               </Button>
@@ -78,7 +78,7 @@ export function HomePage() {
                 size="lg"
                 className="border-cyan-300/50 bg-cyan-500/5 text-cyan-900 hover:bg-cyan-500/12 dark:text-cyan-100 dark:hover:bg-cyan-500/15"
               >
-                <Link href="/dashboard">Mở Dashboard</Link>
+                <Link href="/dashboard">Open Dashboard</Link>
               </Button>
             </div>
           </div>
@@ -132,27 +132,27 @@ export function HomePage() {
 
         <section className="rounded-2xl border border-cyan-300/25 bg-gradient-to-r from-cyan-500/15 via-cyan-400/10 to-transparent p-6 sm:p-8">
           <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Luồng xử lý minh bạch, dễ kiểm soát cho đội vận hành
+            Transparent processing flow for operations teams
           </h2>
           <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted-foreground sm:text-base">
-            FaceGuard AI tách rõ từng lớp xử lý: nhận video, nhận diện khuôn
-            mặt, áp chính sách bảo vệ danh tính và xuất dữ liệu bảo mật. Kiến
-            trúc này giúp team kỹ thuật dễ mở rộng thành dashboard nghiệp vụ ở
-            các bước tiếp theo.
+            FaceGuard AI separates each stage clearly: ingest video, detect
+            faces, enforce identity protection policies, and export secured
+            output. This architecture keeps the codebase maintainable and ready
+            for deeper dashboard modules.
           </p>
           <div className="mt-6 flex flex-wrap items-center gap-3">
             <Button
               asChild
               className="bg-cyan-300 text-cyan-950 hover:bg-cyan-200"
             >
-              <Link href="/auth/register">Đăng ký dùng thử</Link>
+              <Link href="/auth/register">Start Free Registration</Link>
             </Button>
             <Button
               asChild
               variant="ghost"
               className="text-cyan-900 hover:bg-cyan-500/12 dark:text-cyan-100 dark:hover:bg-cyan-500/20"
             >
-              <Link href="/dashboard">Đi đến trung tâm giám sát</Link>
+              <Link href="/dashboard">Go to Monitoring Center</Link>
             </Button>
           </div>
         </section>

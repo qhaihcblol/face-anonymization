@@ -19,7 +19,7 @@ export function ThemeToggle() {
         variant="outline"
         size="icon"
         className="border-cyan-400/40 bg-cyan-500/10"
-        aria-label="Đổi giao diện"
+        aria-label="Toggle theme"
       >
         <SunMedium className="size-4 text-cyan-200" />
       </Button>
@@ -34,7 +34,7 @@ export function ThemeToggle() {
       size="icon"
       className="border-cyan-400/40 bg-cyan-500/10 hover:bg-cyan-500/20"
       onClick={() => setTheme(isDark ? 'light' : 'dark')}
-      aria-label={isDark ? 'Chuyển sang giao diện sáng' : 'Chuyển sang giao diện tối'}
+      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
     >
       {isDark ? (
         <SunMedium className="size-4 text-cyan-200" />
