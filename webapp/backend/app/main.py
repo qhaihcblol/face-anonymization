@@ -7,6 +7,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
+# Import models so SQLAlchemy registers tables before create_all runs.
 from app.models import user as _user_models  # noqa: F401
 from app.utils.exceptions import AppException, app_exception_handler
 
@@ -33,7 +34,7 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(api_router, prefix=settings.api_v1_prefix)
+    app.include_router(api_router, prefix=settings.api_prefix)
     app.add_exception_handler(AppException, app_exception_handler)
 
     @app.get("/health", tags=["health"])
