@@ -1,0 +1,12 @@
+Hãy thiết kế /dashboard giao diện đẹp, hài hòa, cân đối, code clean, phân bố rõ ràng dễ kiểm soát như senior.
+Trang /dashboard bao gồm có thanh tab navigation/tabs có 3 phần: Live Camera, Upload Video, History (Chỉ xuất hiện khi mà đăng nhập).
+Hãy thiết kế Live Camera /dashboard/live chia ra làm 2 phần chính là Webcam và Control Panel.
+Webcam tất nhiên sẽ hiển thị live video (webcam stream), FPS status, nút Start/Stop, Record
+Control Panel bao gồm : 
+Settings:
+- Camera: [Default ▼]
+- Resolution: [720p ▼]
+- FPS: [30 ▼], 
+Filter: blur/... (tùy bạn bổ sung), show boundingbox
+Output: Video được record 
+Bạn hãy suy nghĩ và điều chỉnh cho phù hợp, tôi chỉ đưa ra mẫu chứ có thể thay đỏi 

@@ -11,19 +11,19 @@ export function LoginForm() {
       <CardHeader className="space-y-2">
         <CardTitle className="text-2xl tracking-tight">Sign In</CardTitle>
         <CardDescription>
-          Access your FaceGuard AI workspace with your account credentials.
+          Access your FaceGuard AI workspace with your email and password.
         </CardDescription>
       </CardHeader>
 
       <CardContent>
         <form className="space-y-5" method="post">
           <div className="space-y-2">
-            <Label htmlFor="account">Email or Username</Label>
+            <Label htmlFor="email">Email</Label>
             <Input
-              id="account"
-              name="account"
-              type="text"
-              autoComplete="username"
+              id="email"
+              name="email"
+              type="email"
+              autoComplete="email"
               placeholder="you@company.com"
               required
               className="border-cyan-300/35"

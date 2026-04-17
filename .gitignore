@@ -12,3 +12,6 @@ test_videos/*
 
 outputs/*
 !outputs/.gitkeep
+
+webapp/backend/venv/
+webapp/backend/.env
