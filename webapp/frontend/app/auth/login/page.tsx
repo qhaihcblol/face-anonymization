@@ -1,7 +1,10 @@
 import { AuthShell } from '@/components/faceguard/auth/auth-shell'
 import { LoginForm } from '@/components/faceguard/auth/login-form'
+import { redirectIfAuthenticated } from '@/lib/auth/server'
 
-export default function LoginPage() {
+export default async function LoginPage() {
+  await redirectIfAuthenticated('/dashboard/live')
+
   return (
     <AuthShell
       title="Secure access for privacy operations"

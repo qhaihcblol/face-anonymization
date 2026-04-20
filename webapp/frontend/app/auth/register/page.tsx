@@ -1,7 +1,10 @@
 import { AuthShell } from '@/components/faceguard/auth/auth-shell'
 import { RegisterForm } from '@/components/faceguard/auth/register-form'
+import { redirectIfAuthenticated } from '@/lib/auth/server'
 
-export default function RegisterPage() {
+export default async function RegisterPage() {
+  await redirectIfAuthenticated('/dashboard/live')
+
   return (
     <AuthShell
       title="Create your FaceGuard AI account"
