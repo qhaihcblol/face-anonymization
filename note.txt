@@ -1,0 +1,7 @@
+Bạn là 1 chuyên gia Frontend Nextjs,
+Hãy đọc src frontend của tôi, xem kiến trúc hệ thống, thiết kế clean, chuyên nghiệp, tối ưu
+Tôi muốn bạn hãy thiết kế lại hoàn toàn trang upload-video-panel,được chia làm 3 phần:
+Bên trái là khu vực để upload video như hiện tại, nhưng khi upload video thì sẽ hiển thị video gốc đấy lên màn hình cho người dùng xem luôn.
+Ở giữa thì sẽ là Filter & Overlay gồm option như None, Blur, Pixelate, Mask, Blackout và FaceSwap; Target FPS; Show Bounding Box; Confidence Tag, (có thể xem filter của live-camera-workspace để tham khảo), ở dưới là sẽ có button "Activate Guard"
+Ở bên trái thì sẽ là video result sau khi được xử lý, trong khi process thì có thể sẽ xoay vòng vòng hợp lý không.
+Bạn có thể điều chỉnh cho hợp lý

@@ -1,6 +1,5 @@
-import os
 import cv2
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,13 +55,19 @@ class VideoIO:
 
         # Validate duration
         if not isinstance(duration_sec, (int, float)) or duration_sec <= 0:
-            raise ValueError(f"duration_sec must be a positive number, got {duration_sec}")
+            raise ValueError(
+                f"duration_sec must be a positive number, got {duration_sec}"
+            )
 
         # Type check
         if start_sec is not None and not isinstance(start_sec, (int, float)):
-            raise TypeError(f"start_sec must be a number or None, got {type(start_sec).__name__}")
+            raise TypeError(
+                f"start_sec must be a number or None, got {type(start_sec).__name__}"
+            )
         if end_sec is not None and not isinstance(end_sec, (int, float)):
-            raise TypeError(f"end_sec must be a number or None, got {type(end_sec).__name__}")
+            raise TypeError(
+                f"end_sec must be a number or None, got {type(end_sec).__name__}"
+            )
 
         # Normalize
         start_sec = float(start_sec) if start_sec is not None else 0.0
@@ -85,14 +90,12 @@ class VideoIO:
     ) -> tuple[int, int]:
 
         start_frame = int(start_sec * source_fps)
-        end_frame   = min(int(end_sec * source_fps), total_frames)
+        end_frame = min(int(end_sec * source_fps), total_frames)
 
         return start_frame, end_frame
 
     def _resolve_target_fps(
-        self,
-        source_fps: float,
-        target_fps: int | None
+        self, source_fps: float, target_fps: int | None
     ) -> float | None:
 
         if target_fps is None:
@@ -115,6 +118,7 @@ class VideoIO:
     ) -> bool:
         # Ratio-based comparison avoids unstable sampling caused by round(.5).
         return (frame_offset * target_fps) + 1e-9 >= (emitted_count * source_fps)
+
     def _iter_frames(
         self,
         video_path: str,
@@ -136,12 +140,49 @@ class VideoIO:
                 if not ok:
                     break
 
-                if target_fps is None or self._should_emit_frame(frame_offset, emitted_count, source_fps, target_fps):
+                if target_fps is None or self._should_emit_frame(
+                    frame_offset, emitted_count, source_fps, target_fps
+                ):
                     emitted_count += 1
                     yield frame
         finally:
             cap.release()
 
+    def iter_frames(
+        self,
+        video_path: str,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+        target_fps: int | None = None,
+    ) -> Iterator[np.ndarray]:
+        """
+        Lazily yield frames from a video file.
+
+        Args:
+            video_path: Path to the video file.
+            start_sec:  Start time in seconds. Defaults to 0.0.
+            end_sec:    End time in seconds. Defaults to end of video.
+            target_fps: Target FPS to sample. Defaults to source FPS.
+
+        Yields:
+            Frames as numpy arrays (BGR).
+
+        Raises:
+            ValueError: If video cannot be opened or time range is invalid.
+        """
+        meta = self.get_video_metadata(video_path)
+
+        start_sec, end_sec = self._validate_time_range(
+            meta.duration_sec, start_sec, end_sec
+        )
+        start_frame, end_frame = self._compute_frame_range(
+            meta.fps, meta.frame_count, start_sec, end_sec
+        )
+        resolved_target_fps = self._resolve_target_fps(meta.fps, target_fps)
+
+        yield from self._iter_frames(
+            video_path, start_frame, end_frame, meta.fps, resolved_target_fps
+        )
 
     def extract_frames(
         self,
@@ -165,16 +206,4 @@ class VideoIO:
         Raises:
             ValueError: If video cannot be opened or time range is invalid.
         """
-        meta = self.get_video_metadata(video_path)
-
-        start_sec, end_sec = self._validate_time_range(
-            meta.duration_sec, start_sec, end_sec
-        )
-        start_frame, end_frame = self._compute_frame_range(
-            meta.fps, meta.frame_count, start_sec, end_sec
-        )
-        resolved_target_fps = self._resolve_target_fps(meta.fps, target_fps)
-
-        return list(
-            self._iter_frames(video_path, start_frame, end_frame, meta.fps, resolved_target_fps)
-        )
+        return list(self.iter_frames(video_path, start_sec, end_sec, target_fps))

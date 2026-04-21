@@ -15,3 +15,6 @@ outputs/*
 
 webapp/backend/venv/
 webapp/backend/.env
+
+test_images/*
+

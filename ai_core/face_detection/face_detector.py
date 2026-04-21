@@ -510,3 +510,12 @@ class FaceDetector:
             float(fallback_bgr_mean[1]),
             float(fallback_bgr_mean[2]),
         )
+if __name__ == "__main__":
+    detector = FaceDetector(
+        onnx_path="ai_core/face_detection/onnx/retinaface_best.onnx"
+    )
+    image_path = "test_images/test1.jpg"
+    detections = detector.detect(image_path)
+    print(json.dumps(detections, indent=2))
+    image_result = detector.draw(image_path, detections)
+    Image.fromarray(image_result).save("test_images/test1_result.jpg")

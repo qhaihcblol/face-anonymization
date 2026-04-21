@@ -24,7 +24,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 
 type ResolutionPreset = '480p' | '720p' | '1080p'
-type FilterPreset = 'none' | 'smart-blur' | 'mask' | 'edge-boost'
+type FilterPreset = 'none' | 'blur' | 'pixelate' | 'mask' | 'blackout'
 
 type CameraDevice = {
   id: string
@@ -39,29 +39,35 @@ type RecordedClip = {
   durationSec: string
 }
 
+type ActiveStreamProfile = {
+  width?: number
+  height?: number
+  frameRate?: number
+}
+
 const resolutionConfig: Record<
   ResolutionPreset,
   { width: number; height: number; label: string }
 > = {
-  '480p': { width: 640, height: 480, label: '480p (SD)' },
-  '720p': { width: 1280, height: 720, label: '720p (HD)' },
-  '1080p': { width: 1920, height: 1080, label: '1080p (Full HD)' },
+  '480p': { width: 854, height: 480, label: '480p (16:9)' },
+  '720p': { width: 1280, height: 720, label: '720p (HD, 16:9)' },
+  '1080p': { width: 1920, height: 1080, label: '1080p (Full HD, 16:9)' },
 }
-
-const fpsOptions = ['24', '30', '60']
 
 const filterOptions: Array<{ value: FilterPreset; label: string }> = [
   { value: 'none', label: 'None' },
-  { value: 'smart-blur', label: 'Smart Blur' },
-  { value: 'mask', label: 'Privacy Mask' },
-  { value: 'edge-boost', label: 'Edge Boost' },
+  { value: 'blur', label: 'Blur' },
+  { value: 'pixelate', label: 'Pixelate' },
+  { value: 'mask', label: 'Mask' },
+  { value: 'blackout', label: 'Blackout' },
 ]
 
 const streamFilterMap: Record<FilterPreset, string> = {
   none: 'none',
-  'smart-blur': 'blur(2px) saturate(0.85)',
-  mask: 'contrast(0.95) brightness(0.8) blur(4px)',
-  'edge-boost': 'contrast(1.12) saturate(1.2)',
+  blur: 'none',
+  pixelate: 'none',
+  mask: 'none',
+  blackout: 'none',
 }
 
 function getRecorderMimeType() {
@@ -105,25 +111,26 @@ export function LiveCameraWorkspace() {
   const [cameraDevices, setCameraDevices] = useState<CameraDevice[]>([])
   const [selectedCamera, setSelectedCamera] = useState('default')
   const [resolution, setResolution] = useState<ResolutionPreset>('720p')
-  const [targetFps, setTargetFps] = useState('30')
-  const [filter, setFilter] = useState<FilterPreset>('smart-blur')
+  const [filter, setFilter] = useState<FilterPreset>('none')
   const [showBoundingBox, setShowBoundingBox] = useState(true)
   const [showConfidence, setShowConfidence] = useState(true)
   const [isStreaming, setIsStreaming] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [fps, setFps] = useState(0)
+  const [latencyMs, setLatencyMs] = useState<number | null>(null)
+  const [activeProfile, setActiveProfile] = useState<ActiveStreamProfile | null>(null)
   const [statusMessage, setStatusMessage] = useState('Idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [recordedClips, setRecordedClips] = useState<RecordedClip[]>([])
 
-  clipsRef.current = recordedClips
+  useEffect(() => {
+    clipsRef.current = recordedClips
+  }, [recordedClips])
 
   const filterStyle = useMemo(
     () => ({ filter: streamFilterMap[filter] }),
     [filter],
   )
-
-  const currentResolutionLabel = resolutionConfig[resolution].label
 
   const stopFpsMonitor = () => {
     if (rafRef.current !== null) {
@@ -138,6 +145,7 @@ export function LiveCameraWorkspace() {
 
     frameCounterRef.current = 0
     setFps(0)
+    setLatencyMs(null)
   }
 
   const startFpsMonitor = () => {
@@ -150,7 +158,9 @@ export function LiveCameraWorkspace() {
 
     rafRef.current = window.requestAnimationFrame(tick)
     fpsIntervalRef.current = window.setInterval(() => {
-      setFps(frameCounterRef.current)
+      const currentFps = frameCounterRef.current
+      setFps(currentFps)
+      setLatencyMs(currentFps > 0 ? Math.round(1000 / currentFps) : null)
       frameCounterRef.current = 0
     }, 1000)
   }
@@ -203,6 +213,7 @@ export function LiveCameraWorkspace() {
 
     if (isMountedRef.current) {
       setIsStreaming(false)
+      setActiveProfile(null)
     }
 
     if (updateStatus && isMountedRef.current) {
@@ -221,20 +232,43 @@ export function LiveCameraWorkspace() {
     try {
       stopStream(false)
 
-      const { width, height } = resolutionConfig[resolution]
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: width },
-          height: { ideal: height },
-          frameRate: { ideal: Number(targetFps), max: Number(targetFps) },
-          ...(selectedCamera !== 'default'
-            ? { deviceId: { exact: selectedCamera } }
-            : {}),
-        },
-        audio: false,
-      })
+      const { width, height, label } = resolutionConfig[resolution]
+      const preferredVideoConstraints: MediaTrackConstraints = {
+        width: { ideal: width },
+        height: { ideal: height },
+        aspectRatio: { ideal: 16 / 9 },
+        ...(selectedCamera !== 'default'
+          ? { deviceId: { exact: selectedCamera } }
+          : {}),
+      }
+
+      const fallbackVideoConstraints: MediaTrackConstraints = {
+        ...(selectedCamera !== 'default'
+          ? { deviceId: { exact: selectedCamera } }
+          : {}),
+      }
+
+      const stream = await navigator.mediaDevices
+        .getUserMedia({
+          video: preferredVideoConstraints,
+          audio: false,
+        })
+        .catch(async () =>
+          navigator.mediaDevices.getUserMedia({
+            video: fallbackVideoConstraints,
+            audio: false,
+          }),
+        )
 
       streamRef.current = stream
+
+      const [videoTrack] = stream.getVideoTracks()
+      const trackSettings = videoTrack?.getSettings()
+      setActiveProfile({
+        width: trackSettings?.width,
+        height: trackSettings?.height,
+        frameRate: trackSettings?.frameRate,
+      })
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream
@@ -245,7 +279,15 @@ export function LiveCameraWorkspace() {
       startFpsMonitor()
       if (isMountedRef.current) {
         setIsStreaming(true)
-        setStatusMessage(`Streaming at ${currentResolutionLabel} / ${targetFps} FPS`)
+        const resolvedWidth = trackSettings?.width
+        const resolvedHeight = trackSettings?.height
+        if (resolvedWidth && resolvedHeight) {
+          setStatusMessage(
+            `Streaming at ${label}`,
+          )
+        } else {
+          setStatusMessage(`Streaming with ${label} preference`)
+        }
       }
     } catch {
       if (isMountedRef.current) {
@@ -337,6 +379,8 @@ export function LiveCameraWorkspace() {
   }
 
   useEffect(() => {
+    isMountedRef.current = true
+
     const refreshDevicesOnMount = async () => {
       try {
         if (!navigator.mediaDevices?.enumerateDevices) {
@@ -367,7 +411,7 @@ export function LiveCameraWorkspace() {
     }
 
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange)
-
+    const videoEl = videoRef.current // copy ref
     return () => {
       isMountedRef.current = false
 
@@ -392,8 +436,8 @@ export function LiveCameraWorkspace() {
         streamRef.current.getTracks().forEach((track) => track.stop())
       }
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = null
+      if (videoEl) {
+        videoEl.srcObject = null
       }
 
       clipsRef.current.forEach((clip) => URL.revokeObjectURL(clip.url))
@@ -418,6 +462,9 @@ export function LiveCameraWorkspace() {
               <Badge className="bg-cyan-500/15 text-cyan-700 dark:text-cyan-100">
                 FPS {fps}
               </Badge>
+              <Badge className="bg-cyan-500/15 text-cyan-700 dark:text-cyan-100">
+                Latency {latencyMs !== null ? `${latencyMs} ms` : '--'}
+              </Badge>
             </div>
           </div>
         </CardHeader>
@@ -429,7 +476,7 @@ export function LiveCameraWorkspace() {
               autoPlay
               muted
               playsInline
-              className="h-full w-full object-cover"
+              className="h-full w-full object-contain"
               style={filterStyle}
             />
 
@@ -537,46 +584,26 @@ export function LiveCameraWorkspace() {
               </Select>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="resolution-select">Resolution</Label>
-                <Select
-                  value={resolution}
-                  onValueChange={(value) =>
-                    setResolution(value as ResolutionPreset)
-                  }
+            <div className="space-y-2">
+              <Label htmlFor="resolution-select">Capture Resolution</Label>
+              <Select
+                value={resolution}
+                onValueChange={(value) => setResolution(value as ResolutionPreset)}
+              >
+                <SelectTrigger
+                  id="resolution-select"
+                  className="w-full border-cyan-300/35"
                 >
-                  <SelectTrigger
-                    id="resolution-select"
-                    className="w-full border-cyan-300/35"
-                  >
-                    <SelectValue placeholder="Select resolution" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(resolutionConfig).map(([value, config]) => (
-                      <SelectItem key={value} value={value}>
-                        {config.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="fps-select">FPS</Label>
-                <Select value={targetFps} onValueChange={setTargetFps}>
-                  <SelectTrigger id="fps-select" className="w-full border-cyan-300/35">
-                    <SelectValue placeholder="Select FPS" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {fpsOptions.map((value) => (
-                      <SelectItem key={value} value={value}>
-                        {value} FPS
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+                  <SelectValue placeholder="Select resolution" />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(resolutionConfig).map(([value, config]) => (
+                    <SelectItem key={value} value={value}>
+                      {config.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <Button
@@ -690,13 +717,20 @@ export function LiveCameraWorkspace() {
             )}
           </section>
 
-          <div className="rounded-lg border border-cyan-300/20 bg-gradient-to-r from-cyan-500/16 via-cyan-400/10 to-transparent px-4 py-3">
+          <div className="rounded-lg border border-cyan-300/20 bg-linear-to-r from-cyan-500/16 via-cyan-400/10 to-transparent px-4 py-3">
             <p className="text-sm font-semibold text-foreground">
               Active Pipeline: Webcam → Face Detector → Privacy Filter → Output
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               Mode: {filterOptions.find((item) => item.value === filter)?.label} /
-              Target {targetFps} FPS
+              Current {fps} FPS • Latency {latencyMs !== null ? `${latencyMs} ms` : '--'}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Capture:{' '}
+              {activeProfile?.width && activeProfile?.height
+                ? `${activeProfile.width}x${activeProfile.height}`
+                : 'Not active'}
+              {' '}• Detector input: 640x640
             </p>
           </div>
         </CardContent>
