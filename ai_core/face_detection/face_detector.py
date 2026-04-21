@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Sequence, cast
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -86,13 +87,13 @@ class FaceDetector:
 
     def detect(
         self,
-        image: str | Path | Image.Image | np.ndarray,
+        image: np.ndarray,
         *,
         conf_threshold: float | None = None,
         nms_threshold: float | None = None,
         top_k: int | None = None,
         keep_top_k: int | None = None,
-        assume_bgr: bool = False,
+        assume_bgr: bool = True,
     ) -> list[dict[str, Any]]:
         conf_thr, nms_thr, pre_nms_top_k, post_nms_top_k = (
             self._resolve_detection_params(
@@ -103,8 +104,10 @@ class FaceDetector:
             )
         )
 
-        image_rgb = self._to_numpy_rgb_image(image, assume_bgr=assume_bgr)
-        input_tensor, preprocess_meta = self._preprocess(image_rgb)
+        input_tensor, preprocess_meta = self._preprocess(
+            image=image,
+            assume_bgr=assume_bgr,
+        )
 
         boxes, scores, landmarks = self.forward_raw(input_tensor)
         det_boxes, det_scores, det_landmarks = self._postprocess_predictions(
@@ -150,10 +153,10 @@ class FaceDetector:
 
     def draw(
         self,
-        image: str | Path | Image.Image | np.ndarray,
+        image: np.ndarray,
         detections: list[dict[str, Any]],
         *,
-        assume_bgr: bool = False,
+        assume_bgr: bool = True,
         box_color: tuple[int, int, int] = (0, 255, 0),
         landmark_color: tuple[int, int, int] = (255, 0, 0),
         text_color: tuple[int, int, int] = (255, 255, 0),
@@ -161,7 +164,18 @@ class FaceDetector:
         radius: int = 2,
         draw_score: bool = True,
     ) -> np.ndarray:
-        image_rgb = self._to_numpy_rgb_image(image, assume_bgr=assume_bgr).copy()
+        if image.ndim != 3:
+            raise ValueError("numpy image must have shape (H, W, C)")
+
+        if image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
+        elif image.shape[2] == 4:
+            image = image[:, :, :3]
+        elif image.shape[2] != 3:
+            raise ValueError("numpy image must have 1, 3, or 4 channels")
+
+        array = self._to_uint8(image)
+        image_rgb = (array[:, :, ::-1] if assume_bgr else array).copy()
         canvas = Image.fromarray(image_rgb)
         drawer = ImageDraw.Draw(canvas)
         font = ImageFont.load_default()
@@ -292,7 +306,25 @@ class FaceDetector:
             int(self.keep_top_k if keep_top_k is None else keep_top_k),
         )
 
-    def _preprocess(self, image_rgb: np.ndarray) -> tuple[np.ndarray, _PreprocessMeta]:
+    def _preprocess(
+        self,
+        image: np.ndarray,
+        *,
+        assume_bgr: bool,
+    ) -> tuple[np.ndarray, _PreprocessMeta]:
+        if image.ndim != 3:
+            raise ValueError("numpy image must have shape (H, W, C)")
+
+        if image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
+        elif image.shape[2] == 4:
+            image = image[:, :, :3]
+        elif image.shape[2] != 3:
+            raise ValueError("numpy image must have 1, 3, or 4 channels")
+
+        array = self._to_uint8(image)
+        image_rgb = array[:, :, ::-1] if assume_bgr else array
+
         original_height, original_width = image_rgb.shape[:2]
         processed = image_rgb
 
@@ -329,32 +361,6 @@ class FaceDetector:
             original_height=int(original_height),
         )
         return tensor, preprocess_meta
-
-    @staticmethod
-    def _to_numpy_rgb_image(
-        image: str | Path | Image.Image | np.ndarray,
-        *,
-        assume_bgr: bool,
-    ) -> np.ndarray:
-        if isinstance(image, (str, Path)):
-            with Image.open(image) as img:
-                return np.asarray(img.convert("RGB"), dtype=np.uint8)
-
-        if isinstance(image, Image.Image):
-            return np.asarray(image.convert("RGB"), dtype=np.uint8)
-
-        if isinstance(image, np.ndarray):
-            if image.ndim != 3:
-                raise ValueError("numpy image must have shape (H, W, C)")
-            if image.shape[2] == 1:
-                image = np.repeat(image, 3, axis=2)
-
-            array = FaceDetector._to_uint8(image)
-            if assume_bgr:
-                array = array[:, :, ::-1]
-            return array
-
-        raise TypeError(f"unsupported image type: {type(image)!r}")
 
     @staticmethod
     def _to_uint8(array: np.ndarray) -> np.ndarray:
@@ -510,12 +516,3 @@ class FaceDetector:
             float(fallback_bgr_mean[1]),
             float(fallback_bgr_mean[2]),
         )
-if __name__ == "__main__":
-    detector = FaceDetector(
-        onnx_path="ai_core/face_detection/onnx/retinaface_best.onnx"
-    )
-    image_path = "test_images/test1.jpg"
-    detections = detector.detect(image_path)
-    print(json.dumps(detections, indent=2))
-    image_result = detector.draw(image_path, detections)
-    Image.fromarray(image_result).save("test_images/test1_result.jpg")

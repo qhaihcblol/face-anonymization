@@ -1,13 +1,15 @@
 import cv2
 import os
+import time
+
 from .video_io.video_io import VideoIO
 from .face_detection.face_detector import FaceDetector
 
 # ── Config ──────────────────────────────────────────────────────────────────
 VIDEO_PATH = "test_videos/test1.mp4"
-OUTPUT_DIR = "test_output/frames"
+OUTPUT_DIR = "outputs/frames"
 ONNX_PATH = "ai_core/face_detection/onnx/retinaface_best.onnx"
-TARGET_FPS = 1  # 1 frame/giây để test nhanh
+TARGET_FPS = 1
 # ────────────────────────────────────────────────────────────────────────────
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -17,41 +19,45 @@ face_detector = FaceDetector(onnx_path=ONNX_PATH)
 
 saved = 0
 detected_total = 0
+frame_count = 0
+
+total_detect_time = 0.0
+
+# ⏱️ Tổng thời gian pipeline
+pipeline_start = time.perf_counter()
 
 for frame_idx, frame_bgr in enumerate(
     video_io.iter_frames(video_path=VIDEO_PATH, target_fps=TARGET_FPS)
 ):
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    detections = face_detector.detect(frame_rgb)  # list[BoundingBox]
+    frame_count += 1
 
-    detected_total += len(detections)
+    # ⏱️ đo thời gian detect
+    start = time.perf_counter()
+    faces = face_detector.detect(frame_bgr)
+    detect_time = time.perf_counter() - start
 
-    # ── Vẽ bbox lên frame ───────────────────────────────────────────────────
-    vis = frame_bgr.copy()
-    for det in detections:
-        cv2.rectangle(vis, (det.x1, det.y1), (det.x2, det.y2), (0, 255, 0), 2)
+    total_detect_time += detect_time
 
-        if DRAW_CONF:
-            label = f"{det.confidence:.2f}"
-            cv2.putText(
-                vis,
-                label,
-                (det.x1, det.y1 - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1,
-            )
+    print(f"[Frame {frame_idx}] detect_time = {detect_time:.4f}s, faces = {len(faces)}")
 
-    # ── Lưu frame ───────────────────────────────────────────────────────────
-    out_path = os.path.join(
-        OUTPUT_DIR, f"frame_{frame_idx:04d}_faces{len(detections)}.jpg"
-    )
-    cv2.imwrite(out_path, vis)
-    saved += 1
+    frame_result = face_detector.draw(frame_bgr, faces)
+    detected_total += len(faces)
 
-    print(f"[frame {frame_idx:04d}] detected: {len(detections)} face(s) → {out_path}")
+    if len(faces) > 0:
+        output_path = os.path.join(OUTPUT_DIR, f"frame_{frame_idx:04d}.jpg")
+        cv2.imwrite(output_path, frame_result)
+        saved += 1
 
-print(
-    f"\nDone. {saved} frames saved to '{OUTPUT_DIR}', total faces detected: {detected_total}"
-)
+# ⏱️ tổng kết
+pipeline_time = time.perf_counter() - pipeline_start
+
+avg_detect_time = total_detect_time / frame_count if frame_count > 0 else 0
+fps = frame_count / pipeline_time if pipeline_time > 0 else 0
+
+print("\n===== SUMMARY =====")
+print(f"Total frames: {frame_count}")
+print(f"Total faces detected: {detected_total}")
+print(f"Saved frames: {saved}")
+print(f"Total pipeline time: {pipeline_time:.2f}s")
+print(f"Avg detect time/frame: {avg_detect_time:.4f}s")
+print(f"Effective FPS: {fps:.2f}")
