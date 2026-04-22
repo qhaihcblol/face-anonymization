@@ -2,21 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-import json
 from pathlib import Path
 from typing import Any, Sequence, cast
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 __all__ = ["FaceDetector"]
 
 
 @dataclass(frozen=True)
 class _PreprocessMeta:
-    scale_x: float
-    scale_y: float
+    inv_scale: float
     original_width: int
     original_height: int
 
@@ -26,28 +23,23 @@ class FaceDetector:
         self,
         onnx_path: str | Path,
         *,
-        metadata_path: str | Path | None = None,
-        providers: Sequence[str] | None = None,
         image_size: int | None = None,
-        bgr_mean: tuple[float, float, float] = (104.0, 117.0, 123.0),
-        pad_to_square: bool = True,
         conf_threshold: float = 0.4,
         nms_threshold: float = 0.4,
         top_k: int = 5000,
         keep_top_k: int = 750,
+        pad_value: tuple[int, int, int] = (104, 117, 123),
+        providers: Sequence[str] | None = None,
         intra_op_num_threads: int | None = None,
     ) -> None:
         self.onnx_path = Path(onnx_path)
         if not self.onnx_path.exists():
             raise FileNotFoundError(f"ONNX model not found: {self.onnx_path}")
 
-        metadata = self._load_metadata(self.onnx_path, metadata_path)
-        metadata_input = metadata.get("input", {}) if isinstance(metadata, dict) else {}
-        metadata_thresholds = (
-            metadata.get("postprocess_required", {}).get("suggested_thresholds", {})
-            if isinstance(metadata, dict)
-            else {}
-        )
+        if top_k < 0:
+            raise ValueError("top_k must be >= 0")
+        if keep_top_k < 0:
+            raise ValueError("keep_top_k must be >= 0")
 
         self._ort = self._import_onnxruntime()
         self.session = self._create_session(
@@ -56,107 +48,29 @@ class FaceDetector:
             intra_op_num_threads=intra_op_num_threads,
         )
 
-        input_shape = list(self.session.get_inputs()[0].shape)
-        resolved_image_size = self._resolve_image_size(
-            image_size=image_size,
-            metadata_input=metadata_input,
-            model_input_shape=input_shape,
-        )
-        self.image_size = int(resolved_image_size)
-
-        self.bgr_mean = self._resolve_bgr_mean(bgr_mean, metadata_input)
-        self.pad_to_square = bool(pad_to_square)
-
-        self.conf_threshold = float(
-            metadata_thresholds.get("conf_threshold", conf_threshold)
-        )
-        self.nms_threshold = float(
-            metadata_thresholds.get("nms_threshold", nms_threshold)
-        )
-        self.top_k = int(metadata_thresholds.get("top_k", top_k))
-        self.keep_top_k = int(metadata_thresholds.get("keep_top_k", keep_top_k))
-
         self.input_name = str(self.session.get_inputs()[0].name)
         outputs = self.session.get_outputs()
         if len(outputs) != 3:
-            raise ValueError(
-                "ONNX model must have exactly 3 outputs: boxes, scores, landmarks"
-            )
-
+            raise ValueError("ONNX model must have exactly 3 outputs")
         self.output_names = [str(item.name) for item in outputs]
 
-    def detect(
-        self,
-        image: np.ndarray,
-        *,
-        conf_threshold: float | None = None,
-        nms_threshold: float | None = None,
-        top_k: int | None = None,
-        keep_top_k: int | None = None,
-        assume_bgr: bool = True,
-    ) -> list[dict[str, Any]]:
-        conf_thr, nms_thr, pre_nms_top_k, post_nms_top_k = (
-            self._resolve_detection_params(
-                conf_threshold=conf_threshold,
-                nms_threshold=nms_threshold,
-                top_k=top_k,
-                keep_top_k=keep_top_k,
-            )
-        )
+        self.image_size = self._resolve_image_size(image_size)
+        self.conf_threshold = float(conf_threshold)
+        self.nms_threshold = float(nms_threshold)
+        self.top_k = int(top_k)
+        self.keep_top_k = int(keep_top_k)
+        self.pad_value = tuple(int(np.clip(v, 0, 255)) for v in pad_value)
 
-        input_tensor, preprocess_meta = self._preprocess(
-            image=image,
-            assume_bgr=assume_bgr,
-        )
-
-        boxes, scores, landmarks = self.forward_raw(input_tensor)
-        det_boxes, det_scores, det_landmarks = self._postprocess_predictions(
-            boxes,
-            scores,
-            landmarks,
-            preprocess_meta=preprocess_meta,
-            conf_threshold=conf_thr,
-            nms_threshold=nms_thr,
-            top_k=pre_nms_top_k,
-            keep_top_k=post_nms_top_k,
-        )
-        return self._format_detections(det_boxes, det_scores, det_landmarks)
-
-    def forward_raw(
-        self, input_tensor: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if input_tensor.dtype != np.float32:
-            input_tensor = input_tensor.astype(np.float32, copy=False)
-
-        outputs = self.session.run(
-            self.output_names,
-            {self.input_name: np.ascontiguousarray(input_tensor)},
-        )
-        if len(outputs) != 3:
-            raise RuntimeError("Unexpected ONNX outputs")
-
-        boxes, scores, landmarks = outputs
-
-        if boxes.ndim != 3 or boxes.shape[2] != 4:
-            raise ValueError(f"Invalid boxes shape: {boxes.shape}")
-        if scores.ndim != 2:
-            raise ValueError(f"Invalid scores shape: {scores.shape}")
-        if landmarks.ndim not in {3, 4}:
-            raise ValueError(f"Invalid landmarks shape: {landmarks.shape}")
-
-        if landmarks.ndim == 3:
-            if landmarks.shape[2] != 10:
-                raise ValueError(f"Invalid landmarks shape: {landmarks.shape}")
-            landmarks = landmarks.reshape(landmarks.shape[0], landmarks.shape[1], 5, 2)
-
-        return boxes, scores, landmarks
+    def detect(self, image: np.ndarray) -> list[dict[str, Any]]:
+        input_tensor, meta = self._preprocess(image)
+        boxes, scores, landmarks = self._forward(input_tensor)
+        return self._postprocess(boxes, scores, landmarks, meta)
 
     def draw(
         self,
         image: np.ndarray,
         detections: list[dict[str, Any]],
         *,
-        assume_bgr: bool = True,
         box_color: tuple[int, int, int] = (0, 255, 0),
         landmark_color: tuple[int, int, int] = (255, 0, 0),
         text_color: tuple[int, int, int] = (255, 255, 0),
@@ -164,215 +78,181 @@ class FaceDetector:
         radius: int = 2,
         draw_score: bool = True,
     ) -> np.ndarray:
-        if image.ndim != 3:
-            raise ValueError("numpy image must have shape (H, W, C)")
-
-        if image.shape[2] == 1:
-            image = np.repeat(image, 3, axis=2)
-        elif image.shape[2] == 4:
-            image = image[:, :, :3]
-        elif image.shape[2] != 3:
-            raise ValueError("numpy image must have 1, 3, or 4 channels")
-
-        array = self._to_uint8(image)
-        image_rgb = (array[:, :, ::-1] if assume_bgr else array).copy()
-        canvas = Image.fromarray(image_rgb)
-        drawer = ImageDraw.Draw(canvas)
-        font = ImageFont.load_default()
+        canvas = self._ensure_bgr_uint8(image).copy()
+        line_thickness = max(int(thickness), 1)
+        point_radius = max(int(radius), 1)
 
         for det in detections:
             bbox = np.asarray(det.get("bbox", []), dtype=np.float32)
             if bbox.shape != (4,):
                 continue
 
-            x1, y1, x2, y2 = [float(v) for v in bbox]
-            for offset in range(max(int(thickness), 1)):
-                drawer.rectangle(
-                    [(x1 - offset, y1 - offset), (x2 + offset, y2 + offset)],
-                    outline=box_color,
-                )
+            x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, line_thickness)
 
-            landmarks = np.asarray(det.get("landmarks", []), dtype=np.float32).reshape(
-                -1, 2
-            )
-            for point in landmarks:
-                px, py = float(point[0]), float(point[1])
-                drawer.ellipse(
-                    [(px - radius, py - radius), (px + radius, py + radius)],
-                    fill=landmark_color,
-                    outline=landmark_color,
+            points = np.asarray(det.get("landmarks", []), dtype=np.float32).reshape(-1, 2)
+            for px, py in points:
+                cv2.circle(
+                    canvas,
+                    (int(round(float(px))), int(round(float(py)))),
+                    point_radius,
+                    landmark_color,
+                    thickness=-1,
                 )
 
             if draw_score and "score" in det:
-                score_text = f"{float(det['score']):.3f}"
-                text_position = (x1, max(0.0, y1 - 10.0))
-                drawer.text(text_position, score_text, fill=text_color, font=font)
+                cv2.putText(
+                    canvas,
+                    f"{float(det['score']):.3f}",
+                    (x1, max(0, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    text_color,
+                    line_thickness,
+                    lineType=cv2.LINE_AA,
+                )
 
-        output = np.asarray(canvas, dtype=np.uint8)
-        if assume_bgr:
-            output = output[:, :, ::-1]
-        return output
+        return canvas
 
-    def _postprocess_predictions(
+    def _preprocess(self, image: np.ndarray) -> tuple[np.ndarray, _PreprocessMeta]:
+        image_bgr = self._ensure_bgr_uint8(image)
+        h, w = image_bgr.shape[:2]
+
+        side = max(h, w)
+        scale = float(self.image_size) / float(side)
+        resized_w = min(self.image_size, max(1, int(round(w * scale))))
+        resized_h = min(self.image_size, max(1, int(round(h * scale))))
+
+        resized = cv2.resize(
+            image_bgr,
+            (resized_w, resized_h),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        canvas = np.empty((self.image_size, self.image_size, 3), dtype=np.uint8)
+        canvas[...] = self.pad_value
+        canvas[:resized_h, :resized_w] = resized
+
+        tensor = np.ascontiguousarray(
+            canvas.transpose(2, 0, 1)[None, ...],
+            dtype=np.float32,
+        )
+
+        meta = _PreprocessMeta(
+            inv_scale=float(side) / float(self.image_size),
+            original_width=int(w),
+            original_height=int(h),
+        )
+        return tensor, meta
+
+    def _forward(self, input_tensor: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        outputs = self.session.run(
+            self.output_names,
+            {self.input_name: input_tensor},
+        )
+        if len(outputs) != 3:
+            raise RuntimeError("Unexpected ONNX outputs")
+
+        boxes, scores, landmarks = outputs
+        if boxes.ndim != 3 or boxes.shape[2] != 4:
+            raise ValueError(f"Invalid boxes shape: {boxes.shape}")
+        if scores.ndim != 2:
+            raise ValueError(f"Invalid scores shape: {scores.shape}")
+        if landmarks.ndim not in {3, 4}:
+            raise ValueError(f"Invalid landmarks shape: {landmarks.shape}")
+
+        return boxes, scores, landmarks
+
+    def _postprocess(
         self,
         boxes: np.ndarray,
         scores: np.ndarray,
         landmarks: np.ndarray,
-        *,
-        preprocess_meta: _PreprocessMeta,
-        conf_threshold: float,
-        nms_threshold: float,
-        top_k: int,
-        keep_top_k: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        meta: _PreprocessMeta,
+    ) -> list[dict[str, Any]]:
         boxes_1 = np.asarray(boxes[0], dtype=np.float32)
         scores_1 = np.asarray(scores[0], dtype=np.float32)
-        landmarks_1 = np.asarray(landmarks[0], dtype=np.float32)
 
-        valid = scores_1 > conf_threshold
+        if landmarks.ndim == 4:
+            landmarks_1 = np.asarray(landmarks[0], dtype=np.float32)
+        else:
+            if landmarks.shape[2] != 10:
+                raise ValueError(f"Invalid landmarks shape: {landmarks.shape}")
+            landmarks_1 = np.asarray(landmarks[0], dtype=np.float32).reshape(-1, 5, 2)
+
+        valid = scores_1 > self.conf_threshold
         if not bool(np.any(valid)):
-            return (
-                np.zeros((0, 4), dtype=np.float32),
-                np.zeros((0,), dtype=np.float32),
-                np.zeros((0, 5, 2), dtype=np.float32),
-            )
+            return []
 
         boxes_1 = boxes_1[valid]
         scores_1 = scores_1[valid]
         landmarks_1 = landmarks_1[valid]
 
-        # ONNX outputs are already in pixel coordinates on model input size.
-        # Only map back from model-input space to padded/original image space.
-        scale_x = preprocess_meta.scale_x
-        scale_y = preprocess_meta.scale_y
-        boxes_1[:, 0::2] *= scale_x
-        boxes_1[:, 1::2] *= scale_y
-        landmarks_1[:, :, 0] *= scale_x
-        landmarks_1[:, :, 1] *= scale_y
-
-        max_x = max(float(preprocess_meta.original_width - 1), 0.0)
-        max_y = max(float(preprocess_meta.original_height - 1), 0.0)
-        boxes_1[:, 0::2] = np.clip(boxes_1[:, 0::2], 0.0, max_x)
-        boxes_1[:, 1::2] = np.clip(boxes_1[:, 1::2], 0.0, max_y)
-        landmarks_1[:, :, 0] = np.clip(landmarks_1[:, :, 0], 0.0, max_x)
-        landmarks_1[:, :, 1] = np.clip(landmarks_1[:, :, 1], 0.0, max_y)
-
-        order = np.argsort(scores_1)[::-1]
-        if top_k > 0:
-            order = order[:top_k]
+        if self.top_k > 0 and scores_1.size > self.top_k:
+            top = min(self.top_k, scores_1.size)
+            idx = np.argpartition(scores_1, -top)[-top:]
+            order = idx[np.argsort(scores_1[idx])[::-1]]
+        else:
+            order = np.argsort(scores_1)[::-1]
 
         boxes_1 = boxes_1[order]
         scores_1 = scores_1[order]
         landmarks_1 = landmarks_1[order]
 
-        keep = self._nms(boxes_1, scores_1, threshold=nms_threshold)
-        if keep_top_k > 0:
-            keep = keep[:keep_top_k]
-
-        return boxes_1[keep], scores_1[keep], landmarks_1[keep]
-
-    @staticmethod
-    def _format_detections(
-        boxes: np.ndarray,
-        scores: np.ndarray,
-        landmarks: np.ndarray,
-    ) -> list[dict[str, Any]]:
-        if boxes.size == 0:
+        keep = self._nms(boxes_1, scores_1, self.nms_threshold)
+        if self.keep_top_k > 0:
+            keep = keep[: self.keep_top_k]
+        if keep.size == 0:
             return []
 
+        boxes_kept = boxes_1[keep]
+        scores_kept = scores_1[keep]
+        landmarks_kept = landmarks_1[keep]
+
+        inv_scale = meta.inv_scale
+        boxes_kept[:, 0::2] *= inv_scale
+        boxes_kept[:, 1::2] *= inv_scale
+        landmarks_kept[:, :, 0] *= inv_scale
+        landmarks_kept[:, :, 1] *= inv_scale
+
+        max_x = max(float(meta.original_width - 1), 0.0)
+        max_y = max(float(meta.original_height - 1), 0.0)
+        boxes_kept[:, 0::2] = np.clip(boxes_kept[:, 0::2], 0.0, max_x)
+        boxes_kept[:, 1::2] = np.clip(boxes_kept[:, 1::2], 0.0, max_y)
+        landmarks_kept[:, :, 0] = np.clip(landmarks_kept[:, :, 0], 0.0, max_x)
+        landmarks_kept[:, :, 1] = np.clip(landmarks_kept[:, :, 1], 0.0, max_y)
+
         detections: list[dict[str, Any]] = []
-        for box, score, landmark in zip(boxes, scores, landmarks):
+        for box, score, lm in zip(boxes_kept, scores_kept, landmarks_kept):
             detections.append(
                 {
-                    "bbox": box.astype(np.float32, copy=False).tolist(),
+                    "bbox": box.tolist(),
                     "score": float(score),
-                    "landmarks": landmark.astype(np.float32, copy=False).tolist(),
+                    "landmarks": lm.tolist(),
                 }
             )
         return detections
 
-    def _resolve_detection_params(
-        self,
-        *,
-        conf_threshold: float | None,
-        nms_threshold: float | None,
-        top_k: int | None,
-        keep_top_k: int | None,
-    ) -> tuple[float, float, int, int]:
-        return (
-            float(self.conf_threshold if conf_threshold is None else conf_threshold),
-            float(self.nms_threshold if nms_threshold is None else nms_threshold),
-            int(self.top_k if top_k is None else top_k),
-            int(self.keep_top_k if keep_top_k is None else keep_top_k),
-        )
+    def _ensure_bgr_uint8(self, image: np.ndarray) -> np.ndarray:
+        if not isinstance(image, np.ndarray):
+            raise TypeError("image must be numpy.ndarray")
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("image must have shape (H, W, 3) in BGR format")
+        if image.size == 0:
+            raise ValueError("image must not be empty")
 
-    def _preprocess(
-        self,
-        image: np.ndarray,
-        *,
-        assume_bgr: bool,
-    ) -> tuple[np.ndarray, _PreprocessMeta]:
-        if image.ndim != 3:
-            raise ValueError("numpy image must have shape (H, W, C)")
+        if image.dtype == np.uint8 and image.flags.c_contiguous:
+            return image
 
-        if image.shape[2] == 1:
-            image = np.repeat(image, 3, axis=2)
-        elif image.shape[2] == 4:
-            image = image[:, :, :3]
-        elif image.shape[2] != 3:
-            raise ValueError("numpy image must have 1, 3, or 4 channels")
+        out = image
+        if out.dtype != np.uint8:
+            if np.issubdtype(out.dtype, np.floating):
+                max_value = float(np.nanmax(out)) if out.size > 0 else 0.0
+                if max_value <= 1.0:
+                    out = out * 255.0
+            out = np.clip(out, 0, 255).astype(np.uint8, copy=False)
 
-        array = self._to_uint8(image)
-        image_rgb = array[:, :, ::-1] if assume_bgr else array
-
-        original_height, original_width = image_rgb.shape[:2]
-        processed = image_rgb
-
-        if self.pad_to_square:
-            side = max(original_height, original_width)
-            rgb_fill = (
-                int(self.bgr_mean[2]),
-                int(self.bgr_mean[1]),
-                int(self.bgr_mean[0]),
-            )
-            canvas = np.empty((side, side, 3), dtype=np.uint8)
-            canvas[...] = np.asarray(rgb_fill, dtype=np.uint8)
-            canvas[:original_height, :original_width] = image_rgb
-            processed = canvas
-
-        processed_height, processed_width = processed.shape[:2]
-        resampling_module = getattr(Image, "Resampling", Image)
-        bilinear = getattr(resampling_module, "BILINEAR")
-        resized = np.asarray(
-            Image.fromarray(processed).resize(
-                (self.image_size, self.image_size),
-                resample=bilinear,
-            ),
-            dtype=np.uint8,
-        )
-
-        image_bgr = resized[:, :, ::-1].astype(np.float32, copy=False)
-        tensor = np.ascontiguousarray(image_bgr.transpose(2, 0, 1)[None, ...])
-
-        preprocess_meta = _PreprocessMeta(
-            scale_x=float(processed_width) / float(self.image_size),
-            scale_y=float(processed_height) / float(self.image_size),
-            original_width=int(original_width),
-            original_height=int(original_height),
-        )
-        return tensor, preprocess_meta
-
-    @staticmethod
-    def _to_uint8(array: np.ndarray) -> np.ndarray:
-        if array.dtype == np.uint8:
-            return array
-
-        if np.issubdtype(array.dtype, np.floating):
-            max_value = float(np.nanmax(array)) if array.size > 0 else 0.0
-            if max_value <= 1.0:
-                array = array * 255.0
-
-        return np.clip(array, 0, 255).astype(np.uint8)
+        return np.ascontiguousarray(out)
 
     @staticmethod
     def _nms(boxes: np.ndarray, scores: np.ndarray, threshold: float) -> np.ndarray:
@@ -426,20 +306,17 @@ class FaceDetector:
         providers: Sequence[str] | None,
         intra_op_num_threads: int | None,
     ) -> Any:
-        session_options = self._ort.SessionOptions()
-        session_options.graph_optimization_level = (
-            self._ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        )
+        options = self._ort.SessionOptions()
+        options.graph_optimization_level = self._ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         if isinstance(intra_op_num_threads, int) and intra_op_num_threads > 0:
-            session_options.intra_op_num_threads = int(intra_op_num_threads)
+            options.intra_op_num_threads = int(intra_op_num_threads)
 
         available = set(self._ort.get_available_providers())
-        if providers is None:
-            requested = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        else:
-            requested = [str(name) for name in providers]
-
-        resolved = [name for name in requested if name in available]
+        requested = list(providers) if providers is not None else [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+        resolved = [str(name) for name in requested if str(name) in available]
         if not resolved:
             raise RuntimeError(
                 "No requested ONNX Runtime provider is available. "
@@ -448,71 +325,24 @@ class FaceDetector:
 
         return self._ort.InferenceSession(
             str(onnx_path),
-            sess_options=session_options,
+            sess_options=options,
             providers=resolved,
         )
 
-    @staticmethod
-    def _load_metadata(
-        onnx_path: Path,
-        metadata_path: str | Path | None,
-    ) -> dict[str, Any]:
-        if metadata_path is None:
-            candidate = onnx_path.with_suffix(".json")
-            if not candidate.exists():
-                return {}
-            path = candidate
-        else:
-            path = Path(metadata_path)
-            if not path.exists():
-                raise FileNotFoundError(f"Metadata file not found: {path}")
-
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("Metadata must be a JSON object")
-        return cast(dict[str, Any], raw)
-
-    def _resolve_image_size(
-        self,
-        image_size: int | None,
-        metadata_input: Any,
-        model_input_shape: list[Any],
-    ) -> int:
+    def _resolve_image_size(self, image_size: int | None) -> int:
         if image_size is not None:
+            if image_size <= 0:
+                raise ValueError("image_size must be > 0")
             return int(image_size)
 
-        model_h = model_input_shape[2]
-        model_w = model_input_shape[3]
-        if isinstance(model_h, int) and isinstance(model_w, int) and model_h == model_w:
-            return int(model_h)
+        shape = list(self.session.get_inputs()[0].shape)
+        if len(shape) != 4:
+            raise ValueError("Model input must be 4D NCHW")
 
-        if isinstance(metadata_input, dict):
-            meta_size = metadata_input.get("shape")
-            if isinstance(meta_size, list) and len(meta_size) == 4:
-                h = meta_size[2]
-                w = meta_size[3]
-                if isinstance(h, int) and isinstance(w, int) and h == w:
-                    return int(h)
+        h, w = shape[2], shape[3]
+        if isinstance(h, int) and isinstance(w, int) and h > 0 and h == w:
+            return int(h)
 
         raise ValueError(
-            "Cannot infer image_size. Pass image_size explicitly or provide metadata json."
-        )
-
-    @staticmethod
-    def _resolve_bgr_mean(
-        fallback_bgr_mean: tuple[float, float, float],
-        metadata_input: Any,
-    ) -> tuple[float, float, float]:
-        if isinstance(metadata_input, dict):
-            preprocess = metadata_input.get("preprocess_in_model")
-            if isinstance(preprocess, dict):
-                raw = preprocess.get("subtract_bgr_mean")
-                if isinstance(raw, list) and len(raw) == 3:
-                    if all(isinstance(v, (int, float)) for v in raw):
-                        return (float(raw[0]), float(raw[1]), float(raw[2]))
-
-        return (
-            float(fallback_bgr_mean[0]),
-            float(fallback_bgr_mean[1]),
-            float(fallback_bgr_mean[2]),
+            "Cannot infer image_size from model input. Pass image_size explicitly."
         )
