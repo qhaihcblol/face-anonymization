@@ -1,6 +1,7 @@
 import cv2
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -148,6 +149,69 @@ class VideoIO:
         finally:
             cap.release()
 
+    def _validate_output_fps(self, fps: float) -> float:
+        if not isinstance(fps, (int, float)) or fps <= 0:
+            raise ValueError(f"fps must be a positive number, got {fps}")
+        return float(fps)
+
+    def _normalize_frame_for_write(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        expected_size: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        if not isinstance(frame, np.ndarray):
+            raise TypeError(
+                f"frame at index {frame_index} must be numpy.ndarray, "
+                f"got {type(frame).__name__}"
+            )
+
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        elif frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError(
+                f"frame at index {frame_index} must have shape (H, W, 3), "
+                f"got {frame.shape}"
+            )
+
+        height, width = frame.shape[:2]
+        if expected_size is not None:
+            expected_height, expected_width = expected_size
+            if (height, width) != (expected_height, expected_width):
+                raise ValueError(
+                    "all frames must share the same size; "
+                    f"frame at index {frame_index} has {(width, height)}, "
+                    f"expected {(expected_width, expected_height)}"
+                )
+
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+        return frame
+
+    def _create_video_writer(
+        self,
+        output_path: str,
+        fps: float,
+        width: int,
+        height: int,
+        codec: str,
+    ) -> cv2.VideoWriter:
+        if not isinstance(codec, str) or len(codec) != 4:
+            raise ValueError(
+                f"codec must be a 4-character string (e.g. 'mp4v'), got {codec}"
+            )
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        fourcc = cv2.VideoWriter.fourcc(*codec)
+        writer = cv2.VideoWriter(str(output), fourcc, fps, (width, height))
+        if not writer.isOpened():
+            raise ValueError(f"Cannot create output video: {output_path}")
+
+        return writer
+
     def iter_frames(
         self,
         video_path: str,
@@ -207,3 +271,62 @@ class VideoIO:
             ValueError: If video cannot be opened or time range is invalid.
         """
         return list(self.iter_frames(video_path, start_sec, end_sec, target_fps))
+
+    def write_frames(
+        self,
+        frames: Iterable[np.ndarray],
+        output_path: str,
+        fps: float,
+        codec: str = "mp4v",
+    ) -> VideoMetadata:
+        """
+        Write frames to a video file.
+
+        Args:
+            frames: Iterable of frames as numpy arrays (preferably BGR).
+            output_path: Path of the output video file.
+            fps: Output video FPS.
+            codec: FourCC codec (default: 'mp4v').
+
+        Returns:
+            Metadata of the created output video.
+
+        Raises:
+            ValueError: If fps/codec/frames are invalid or output cannot be created.
+            TypeError: If any frame is not a numpy array.
+        """
+        fps = self._validate_output_fps(fps)
+
+        frame_iter = iter(frames)
+        try:
+            first_frame = next(frame_iter)
+        except StopIteration as exc:
+            raise ValueError("frames is empty; cannot build output video") from exc
+
+        first_frame = self._normalize_frame_for_write(first_frame, frame_index=0)
+        height, width = first_frame.shape[:2]
+
+        writer = self._create_video_writer(output_path, fps, width, height, codec)
+        frame_count = 0
+        try:
+            writer.write(first_frame)
+            frame_count += 1
+
+            for frame_index, frame in enumerate(frame_iter, start=1):
+                normalized = self._normalize_frame_for_write(
+                    frame,
+                    frame_index=frame_index,
+                    expected_size=(height, width),
+                )
+                writer.write(normalized)
+                frame_count += 1
+        finally:
+            writer.release()
+
+        return VideoMetadata(
+            fps=fps,
+            frame_count=frame_count,
+            duration_sec=frame_count / fps,
+            width=width,
+            height=height,
+        )

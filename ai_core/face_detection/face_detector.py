@@ -8,7 +8,45 @@ from typing import Any, Sequence, cast
 import cv2
 import numpy as np
 
-__all__ = ["FaceDetector"]
+__all__ = ["FaceLandmarks", "FaceDetection", "FaceDetector"]
+
+
+@dataclass(slots=True)
+class FaceLandmarks:
+    left_eye: tuple[float, float]
+    right_eye: tuple[float, float]
+    nose: tuple[float, float]
+    left_mouth: tuple[float, float]
+    right_mouth: tuple[float, float]
+
+    def as_array(self) -> np.ndarray:
+        return np.asarray(
+            [
+                self.left_eye,
+                self.right_eye,
+                self.nose,
+                self.left_mouth,
+                self.right_mouth,
+            ],
+            dtype=np.float32,
+        )
+
+
+@dataclass(slots=True)
+class FaceDetection:
+    bbox: tuple[float, float, float, float]  # (x1, y1, x2, y2)
+    score: float
+    landmarks: FaceLandmarks
+
+    def width(self) -> float:
+        return self.bbox[2] - self.bbox[0]
+
+    def height(self) -> float:
+        return self.bbox[3] - self.bbox[1]
+
+    def center(self) -> tuple[float, float]:
+        x1, y1, x2, y2 = self.bbox
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
 
 
 @dataclass(frozen=True)
@@ -61,7 +99,7 @@ class FaceDetector:
         self.keep_top_k = int(keep_top_k)
         self.pad_value = tuple(int(np.clip(v, 0, 255)) for v in pad_value)
 
-    def detect(self, image: np.ndarray) -> list[dict[str, Any]]:
+    def detect(self, image: np.ndarray) -> list[FaceDetection]:
         input_tensor, meta = self._preprocess(image)
         boxes, scores, landmarks = self._forward(input_tensor)
         return self._postprocess(boxes, scores, landmarks, meta)
@@ -69,7 +107,7 @@ class FaceDetector:
     def draw(
         self,
         image: np.ndarray,
-        detections: list[dict[str, Any]],
+        detections: list[FaceDetection],
         *,
         box_color: tuple[int, int, int] = (0, 255, 0),
         landmark_color: tuple[int, int, int] = (255, 0, 0),
@@ -83,14 +121,10 @@ class FaceDetector:
         point_radius = max(int(radius), 1)
 
         for det in detections:
-            bbox = np.asarray(det.get("bbox", []), dtype=np.float32)
-            if bbox.shape != (4,):
-                continue
-
-            x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+            x1, y1, x2, y2 = [int(round(float(v))) for v in det.bbox]
             cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, line_thickness)
 
-            points = np.asarray(det.get("landmarks", []), dtype=np.float32).reshape(-1, 2)
+            points = det.landmarks.as_array()
             for px, py in points:
                 cv2.circle(
                     canvas,
@@ -100,10 +134,10 @@ class FaceDetector:
                     thickness=-1,
                 )
 
-            if draw_score and "score" in det:
+            if draw_score:
                 cv2.putText(
                     canvas,
-                    f"{float(det['score']):.3f}",
+                    f"{det.score:.3f}",
                     (x1, max(0, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.45,
@@ -169,7 +203,7 @@ class FaceDetector:
         scores: np.ndarray,
         landmarks: np.ndarray,
         meta: _PreprocessMeta,
-    ) -> list[dict[str, Any]]:
+    ) -> list[FaceDetection]:
         boxes_1 = np.asarray(boxes[0], dtype=np.float32)
         scores_1 = np.asarray(scores[0], dtype=np.float32)
 
@@ -222,14 +256,26 @@ class FaceDetector:
         landmarks_kept[:, :, 0] = np.clip(landmarks_kept[:, :, 0], 0.0, max_x)
         landmarks_kept[:, :, 1] = np.clip(landmarks_kept[:, :, 1], 0.0, max_y)
 
-        detections: list[dict[str, Any]] = []
+        detections: list[FaceDetection] = []
         for box, score, lm in zip(boxes_kept, scores_kept, landmarks_kept):
+            landmarks_obj = FaceLandmarks(
+                left_eye=(float(lm[0, 0]), float(lm[0, 1])),
+                right_eye=(float(lm[1, 0]), float(lm[1, 1])),
+                nose=(float(lm[2, 0]), float(lm[2, 1])),
+                left_mouth=(float(lm[3, 0]), float(lm[3, 1])),
+                right_mouth=(float(lm[4, 0]), float(lm[4, 1])),
+            )
             detections.append(
-                {
-                    "bbox": box.tolist(),
-                    "score": float(score),
-                    "landmarks": lm.tolist(),
-                }
+                FaceDetection(
+                    bbox=(
+                        float(box[0]),
+                        float(box[1]),
+                        float(box[2]),
+                        float(box[3]),
+                    ),
+                    score=float(score),
+                    landmarks=landmarks_obj,
+                )
             )
         return detections
 
