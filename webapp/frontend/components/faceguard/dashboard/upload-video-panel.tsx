@@ -10,7 +10,13 @@ import {
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
@@ -23,7 +29,15 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 
-type FilterPreset = 'none' | 'blur' | 'pixelate' | 'mask' | 'blackout' | 'faceswap'
+type FilterPreset = 'none' | 'blur' | 'pixelate' | 'mask' | 'blackout'
+
+type ProcessingRequest = {
+  method: FilterPreset
+  target_fps: number
+  start_sec?: number
+  end_sec?: number
+  draw_tracks: boolean
+}
 
 const filterOptions: Array<{ value: FilterPreset; label: string }> = [
   { value: 'none', label: 'None' },
@@ -31,7 +45,6 @@ const filterOptions: Array<{ value: FilterPreset; label: string }> = [
   { value: 'pixelate', label: 'Pixelate' },
   { value: 'mask', label: 'Mask' },
   { value: 'blackout', label: 'Blackout' },
-  { value: 'faceswap', label: 'FaceSwap' },
 ]
 
 const resultFilterMap: Record<FilterPreset, string> = {
@@ -40,31 +53,58 @@ const resultFilterMap: Record<FilterPreset, string> = {
   pixelate: 'contrast(1.06) saturate(0.65)',
   mask: 'none',
   blackout: 'brightness(0.14) contrast(1.25)',
-  faceswap: 'hue-rotate(128deg) saturate(1.35) contrast(1.05)',
+}
+
+function parseOptionalSecond(value: string, fieldName: string): number | undefined {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) {
+    return undefined
+  }
+
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${fieldName} must be a number >= 0.`)
+  }
+
+  return parsed
+}
+
+function parseTargetFps(value: string): number {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error('Target FPS must be an integer greater than 0.')
+  }
+
+  return parsed
 }
 
 export function UploadVideoPanel() {
-  const [files, setFiles] = useState<File[]>([])
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(null)
   const [resultVideoUrl, setResultVideoUrl] = useState<string | null>(null)
   const [filter, setFilter] = useState<FilterPreset>('blur')
-  const [targetFps, setTargetFps] = useState('30')
+  const [targetFpsInput, setTargetFpsInput] = useState('30')
+  const [startSecInput, setStartSecInput] = useState('')
+  const [endSecInput, setEndSecInput] = useState('')
   const [showBoundingBox, setShowBoundingBox] = useState(true)
-  const [showConfidence, setShowConfidence] = useState(true)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processingProgress, setProcessingProgress] = useState(0)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [lastRequest, setLastRequest] = useState<ProcessingRequest | null>(null)
 
   const previewUrlRef = useRef<string | null>(null)
   const progressIntervalRef = useRef<number | null>(null)
   const completionTimeoutRef = useRef<number | null>(null)
 
-  const totalSizeMB = useMemo(
-    () =>
-      files.reduce((total, file) => total + file.size / (1024 * 1024), 0).toFixed(2),
-    [files],
-  )
+  const selectedFileSizeMB = useMemo(() => {
+    if (!selectedFile) {
+      return '0.00'
+    }
 
-  const queueProgress = files.length === 0 ? 0 : Math.min(100, files.length * 34)
+    return (selectedFile.size / (1024 * 1024)).toFixed(2)
+  }, [selectedFile])
+
+  const queueProgress = selectedFile ? 100 : 0
 
   const clearProcessingTimers = () => {
     if (progressIntervalRef.current !== null) {
@@ -79,39 +119,76 @@ export function UploadVideoPanel() {
   }
 
   const handleUploadChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = Array.from(event.target.files ?? [])
-    setFiles(selectedFiles)
+    const nextFile = event.target.files?.[0] ?? null
+    setSelectedFile(nextFile)
 
     clearProcessingTimers()
     setIsProcessing(false)
     setProcessingProgress(0)
     setResultVideoUrl(null)
+    setFormError(null)
 
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current)
       previewUrlRef.current = null
     }
 
-    if (selectedFiles.length === 0) {
+    if (!nextFile) {
       setOriginalVideoUrl(null)
       return
     }
 
-    const nextPreviewUrl = URL.createObjectURL(selectedFiles[0])
+    const nextPreviewUrl = URL.createObjectURL(nextFile)
     previewUrlRef.current = nextPreviewUrl
     setOriginalVideoUrl(nextPreviewUrl)
   }
 
+  const buildProcessingRequest = (): ProcessingRequest => {
+    const targetFps = parseTargetFps(targetFpsInput)
+    const startSec = parseOptionalSecond(startSecInput, 'Start sec')
+    const endSec = parseOptionalSecond(endSecInput, 'End sec')
+
+    if (
+      startSec !== undefined &&
+      endSec !== undefined &&
+      endSec <= startSec
+    ) {
+      throw new Error('End sec must be greater than Start sec.')
+    }
+
+    return {
+      method: filter,
+      target_fps: targetFps,
+      start_sec: startSec,
+      end_sec: endSec,
+      draw_tracks: showBoundingBox,
+    }
+  }
+
   const activateGuard = () => {
-    if (!originalVideoUrl || files.length === 0) {
+    if (!originalVideoUrl || !selectedFile) {
       return
     }
+
+    let requestPayload: ProcessingRequest
+    try {
+      requestPayload = buildProcessingRequest()
+    } catch (error) {
+      setFormError(
+        error instanceof Error ? error.message : 'Invalid processing parameters.',
+      )
+      return
+    }
+
+    setFormError(null)
+    setLastRequest(requestPayload)
 
     clearProcessingTimers()
     setIsProcessing(true)
     setProcessingProgress(8)
     setResultVideoUrl(null)
 
+    // Placeholder processing simulation. Replace with API call when backend endpoint is ready.
     progressIntervalRef.current = window.setInterval(() => {
       setProcessingProgress((current) => Math.min(94, current + 8))
     }, 160)
@@ -139,29 +216,33 @@ export function UploadVideoPanel() {
         <CardHeader>
           <CardTitle className="text-xl tracking-tight">Original Upload</CardTitle>
           <CardDescription>
-            Upload your video and preview the raw source before enabling protection.
+            Upload one video file and preview the raw source before processing.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-5">
+        <CardContent className="space-y-4">
           <label
             htmlFor="video-upload"
-            className="group block cursor-pointer rounded-2xl border border-dashed border-cyan-300/35 bg-cyan-500/10 p-8 text-center transition-colors hover:border-cyan-300/60 hover:bg-cyan-500/15"
+            className="group grid cursor-pointer gap-3 rounded-xl border border-dashed border-cyan-300/35 bg-cyan-500/10 p-4 transition-colors hover:border-cyan-300/60 hover:bg-cyan-500/15 sm:grid-cols-[auto_1fr_auto] sm:items-center"
           >
-            <FolderUp className="mx-auto mb-3 size-10 text-cyan-700 transition-transform group-hover:scale-105 dark:text-cyan-300" />
-            <p className="text-base font-semibold text-foreground">
-              Drop video files here or click to browse
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Supports .mp4, .mov, .webm (up to 2GB per file)
-            </p>
+            <FolderUp className="mx-auto size-7 text-cyan-700 transition-transform group-hover:scale-105 dark:text-cyan-300 sm:mx-0" />
+            <div className="text-center sm:text-left">
+              <p className="text-sm font-semibold text-foreground">
+                Upload one video file
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Supports .mp4, .mov, .webm (up to 2GB)
+              </p>
+            </div>
             <Input
               id="video-upload"
               type="file"
               accept="video/*"
-              multiple
-              className="mt-4 border-cyan-300/35"
+              className="sr-only"
               onChange={handleUploadChange}
             />
+            <span className="inline-flex items-center justify-center rounded-md border border-cyan-300/45 bg-cyan-500/15 px-3 py-1.5 text-xs font-medium text-cyan-100 transition-colors group-hover:bg-cyan-500/25">
+              Choose file
+            </span>
           </label>
 
           <div className="relative aspect-video overflow-hidden rounded-xl border border-cyan-300/25 bg-slate-900/90">
@@ -185,14 +266,16 @@ export function UploadVideoPanel() {
 
           <section className="rounded-xl border border-cyan-300/20 bg-cyan-500/10 p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-foreground">Queue Status</p>
+              <p className="text-sm font-semibold text-foreground">Upload Status</p>
               <Badge className="bg-cyan-500/20 text-cyan-700 dark:text-cyan-100">
-                {files.length} file(s)
+                {selectedFile ? '1 file selected' : 'No file'}
               </Badge>
             </div>
             <Progress value={queueProgress} className="h-2.5" />
             <p className="mt-2 text-xs text-muted-foreground">
-              Total size: {totalSizeMB} MB
+              {selectedFile
+                ? `${selectedFile.name} (${selectedFileSizeMB} MB)`
+                : 'Select a video file to begin.'}
             </p>
           </section>
         </CardContent>
@@ -202,7 +285,7 @@ export function UploadVideoPanel() {
         <CardHeader>
           <CardTitle className="text-xl tracking-tight">Filter and Overlay</CardTitle>
           <CardDescription>
-            Configure identity protection before processing your uploaded file.
+            Configure processing options and run protection for the selected video.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -210,7 +293,10 @@ export function UploadVideoPanel() {
             <Label htmlFor="filter-select">Privacy Filter</Label>
             <Select
               value={filter}
-              onValueChange={(value) => setFilter(value as FilterPreset)}
+              onValueChange={(value) => {
+                setFilter(value as FilterPreset)
+                setFormError(null)
+              }}
             >
               <SelectTrigger id="filter-select" className="w-full border-cyan-300/35">
                 <SelectValue placeholder="Select filter" />
@@ -227,17 +313,60 @@ export function UploadVideoPanel() {
 
           <div className="space-y-2">
             <Label htmlFor="target-fps">Target FPS</Label>
-            <Select value={targetFps} onValueChange={setTargetFps}>
-              <SelectTrigger id="target-fps" className="w-full border-cyan-300/35">
-                <SelectValue placeholder="Select FPS" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="15">15 FPS</SelectItem>
-                <SelectItem value="24">24 FPS</SelectItem>
-                <SelectItem value="30">30 FPS</SelectItem>
-                <SelectItem value="60">60 FPS</SelectItem>
-              </SelectContent>
-            </Select>
+            <Input
+              id="target-fps"
+              type="number"
+              min={1}
+              step={1}
+              inputMode="numeric"
+              value={targetFpsInput}
+              onChange={(event) => {
+                setTargetFpsInput(event.target.value)
+                setFormError(null)
+              }}
+              className="border-cyan-300/35"
+            />
+            <p className="text-xs text-muted-foreground">
+              This value is sent as `target_fps` in the processing request.
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="start-sec">Start sec</Label>
+              <Input
+                id="start-sec"
+                type="number"
+                min={0}
+                step={0.1}
+                inputMode="decimal"
+                placeholder="Auto"
+                value={startSecInput}
+                onChange={(event) => {
+                  setStartSecInput(event.target.value)
+                  setFormError(null)
+                }}
+                className="border-cyan-300/35"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="end-sec">End sec</Label>
+              <Input
+                id="end-sec"
+                type="number"
+                min={0}
+                step={0.1}
+                inputMode="decimal"
+                placeholder="Auto"
+                value={endSecInput}
+                onChange={(event) => {
+                  setEndSecInput(event.target.value)
+                  setFormError(null)
+                }}
+                className="border-cyan-300/35"
+              />
+            </div>
           </div>
 
           <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
@@ -247,40 +376,39 @@ export function UploadVideoPanel() {
             <Switch
               id="show-bounding-box"
               checked={showBoundingBox}
-              onCheckedChange={setShowBoundingBox}
+              onCheckedChange={(checked) => {
+                setShowBoundingBox(checked)
+                setFormError(null)
+              }}
             />
           </div>
 
-          <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
-            <Label htmlFor="show-confidence" className="text-sm">
-              Confidence Tag
-            </Label>
-            <Switch
-              id="show-confidence"
-              checked={showConfidence}
-              onCheckedChange={setShowConfidence}
-            />
-          </div>
-
-          <div className="rounded-lg border border-cyan-300/20 bg-linear-to-r from-cyan-500/16 via-cyan-400/10 to-transparent px-4 py-3">
-            <p className="text-sm font-semibold text-foreground">
-              Pipeline: Upload Video -&gt; Face Detection -&gt; Privacy Filter -&gt; Result
-            </p>
+          <div className="rounded-lg border border-cyan-300/20 bg-linear-to-r from-cyan-500/14 via-cyan-400/8 to-transparent px-4 py-3">
+            <p className="text-sm font-semibold text-foreground">Current Settings</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Active preset: {filterOptions.find((option) => option.value === filter)?.label} |
-              Target {targetFps} FPS
+              Filter {filterOptions.find((option) => option.value === filter)?.label} | FPS
+              {' '}
+              {targetFpsInput.trim() || '--'} | Range {startSecInput.trim() || 'auto'}s to
+              {' '}
+              {endSecInput.trim() || 'auto'}s
             </p>
           </div>
+
+          {formError && (
+            <div className="rounded-lg border border-red-400/35 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+              {formError}
+            </div>
+          )}
 
           <Button
             onClick={activateGuard}
-            disabled={!originalVideoUrl || isProcessing}
+            disabled={!originalVideoUrl || !selectedFile || isProcessing}
             className="w-full bg-cyan-400 text-cyan-950 hover:bg-cyan-300"
           >
             {isProcessing ? (
               <>
                 <Loader2 className="size-4 animate-spin" />
-                Activating...
+                Processing...
               </>
             ) : (
               <>
@@ -301,7 +429,7 @@ export function UploadVideoPanel() {
               <Progress value={processingProgress} className="h-2.5" />
               <p className="mt-2 text-xs text-muted-foreground">
                 {isProcessing
-                  ? 'Guard is processing this video with selected privacy controls.'
+                  ? 'Guard is processing this video with selected settings.'
                   : 'Guard completed. Review the protected output on the right panel.'}
               </p>
             </section>
@@ -350,7 +478,7 @@ export function UploadVideoPanel() {
                 />
 
                 {filter === 'pixelate' && (
-                  <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(transparent_94%,rgba(8,145,178,0.5)_95%),linear-gradient(90deg,transparent_94%,rgba(8,145,178,0.5)_95%)] bg-[size:14px_14px] opacity-30" />
+                  <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(transparent_94%,rgba(8,145,178,0.5)_95%),linear-gradient(90deg,transparent_94%,rgba(8,145,178,0.5)_95%)] bg-size-[14px_14px] opacity-30" />
                 )}
 
                 {showBoundingBox && (
@@ -366,12 +494,6 @@ export function UploadVideoPanel() {
                     <div className="pointer-events-none absolute top-[36%] right-[23%] h-28 w-24 rounded-full bg-slate-950/80" />
                   </>
                 )}
-
-                {showConfidence && (
-                  <p className="pointer-events-none absolute right-3 bottom-3 rounded-md border border-cyan-300/35 bg-slate-950/70 px-2 py-1 text-xs text-cyan-100">
-                    Face confidence: 98.4%
-                  </p>
-                )}
               </>
             )}
           </div>
@@ -384,19 +506,21 @@ export function UploadVideoPanel() {
             <p className="mt-1 text-xs text-muted-foreground">
               Mode: {filterOptions.find((option) => option.value === filter)?.label} | Target
               {' '}
-              {targetFps} FPS | Bounding Box {showBoundingBox ? 'On' : 'Off'} | Confidence
+              {lastRequest?.target_fps ?? '--'} FPS | Range {lastRequest?.start_sec ?? 'auto'}s
               {' '}
-              {showConfidence ? 'On' : 'Off'}
+              to {lastRequest?.end_sec ?? 'auto'}s | Bounding Box
+              {' '}
+              {lastRequest?.draw_tracks ? 'On' : 'Off'}
             </p>
           </div>
 
-          {files[0] && resultVideoUrl && (
+          {selectedFile && resultVideoUrl && (
             <Button
               asChild
               variant="outline"
               className="w-full border-cyan-300/35 bg-cyan-500/5 hover:bg-cyan-500/15"
             >
-              <a href={resultVideoUrl} download={`guarded-preview-${files[0].name}`}>
+              <a href={resultVideoUrl} download={`guarded-preview-${selectedFile.name}`}>
                 <FileVideo className="size-4" />
                 Download Preview
               </a>
