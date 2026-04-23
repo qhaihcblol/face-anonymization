@@ -1,6 +1,6 @@
 from collections.abc import AsyncGenerator
 
-from fastapi import Depends, status
+from fastapi import Depends, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from app.core.security import decode_access_token
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
+from app.services.video_service import VideoPipelineService
 from app.utils.exceptions import AppException
 
 
@@ -44,3 +45,13 @@ async def get_current_user(
         raise credentials_error
 
     return user
+
+
+def get_video_service(request: Request) -> VideoPipelineService:
+    video_service = getattr(request.app.state, "video_service", None)
+    if video_service is None:
+        raise AppException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Video service is not ready. Please retry shortly.",
+        )
+    return video_service

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import field_validator
@@ -17,6 +18,11 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
     ]
     sql_echo: bool = False
+    video_upload_dir: str = "storage/uploads"
+    video_output_dir: str = "storage/outputs"
+    retinaface_onnx_path: str | None = None
+    video_max_upload_mb: int = 2048
+    video_allowed_extensions: list[str] = [".mp4", ".mov", ".webm", ".mkv", ".avi"]
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -35,6 +41,25 @@ class Settings(BaseSettings):
             if raw_value.startswith("["):
                 return value
             return [item.strip() for item in raw_value.split(",") if item.strip()]
+        return value
+
+    @field_validator("video_allowed_extensions", mode="before")
+    @classmethod
+    def parse_video_extensions(cls, value: str | list[str]) -> str | list[str]:
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+            if raw_value.startswith("["):
+                return value
+            return [item.strip() for item in raw_value.split(",") if item.strip()]
+        return value
+
+    @field_validator("video_max_upload_mb")
+    @classmethod
+    def validate_video_max_upload_mb(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("video_max_upload_mb must be > 0")
         return value
 
     @property
@@ -87,6 +112,53 @@ class Settings(BaseSettings):
                 connect_args["ssl"] = True
 
         return connect_args
+
+    @property
+    def backend_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    @property
+    def project_root(self) -> Path:
+        return Path(__file__).resolve().parents[4]
+
+    @property
+    def ai_core_root(self) -> Path:
+        return self.project_root / "ai_core"
+
+    @property
+    def resolved_retinaface_onnx_path(self) -> Path:
+        if self.retinaface_onnx_path:
+            configured = Path(self.retinaface_onnx_path)
+            if not configured.is_absolute():
+                configured = (self.backend_root / configured).resolve()
+            return configured
+        return (self.ai_core_root / "face_detection" / "onnx" / "retinaface_best.onnx").resolve()
+
+    @property
+    def resolved_video_upload_dir(self) -> Path:
+        directory = Path(self.video_upload_dir)
+        if not directory.is_absolute():
+            directory = self.backend_root / directory
+        return directory.resolve()
+
+    @property
+    def resolved_video_output_dir(self) -> Path:
+        directory = Path(self.video_output_dir)
+        if not directory.is_absolute():
+            directory = self.backend_root / directory
+        return directory.resolve()
+
+    @property
+    def resolved_video_allowed_extensions(self) -> set[str]:
+        return {
+            f".{ext.lower().lstrip('.')}"
+            for ext in self.video_allowed_extensions
+            if ext and ext.strip()
+        }
+
+    @property
+    def video_max_upload_bytes(self) -> int:
+        return int(self.video_max_upload_mb) * 1024 * 1024
 
 
 @lru_cache
