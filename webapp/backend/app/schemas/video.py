@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
 FilterMethod = Literal["none", "blur", "pixelate", "mask", "blackout"]
 
 
@@ -33,7 +32,7 @@ class VideoAnonymizeRequest(BaseModel):
     end_sec: float | None = Field(default=None, ge=0)
     blur_new: bool = False
     draw_tracks: bool = False
-    codec: str = "mp4v"
+    codec: str = "H264"
     progress_every: int = Field(default=60, ge=0)
 
     @model_validator(mode="after")

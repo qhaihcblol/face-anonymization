@@ -134,7 +134,7 @@ class VideoAnonymization:
         end_sec: float | None = None,
         blur_new: bool = False,
         draw_tracks: bool = False,
-        codec: str = "mp4v",
+        codec: str = "H264",
         progress_every: int = 60,
     ) -> VideoAnonymizationResult:
         input_path = Path(input_path)
