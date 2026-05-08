@@ -7,24 +7,12 @@ from pathlib import Path
 
 import cv2
 
-try:
-    from ai_core.face_anonymization.face_anonymizer import (
-        AnonymizationMethod,
-        FaceAnonymizer,
-    )
-    from ai_core.face_detection.face_detector import FaceDetector
-    from ai_core.face_tracking.face_tracker import ByteTracker
-except ModuleNotFoundError:
-    project_root = Path(__file__).resolve().parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
-    from ai_core.face_anonymization.face_anonymizer import (
-        AnonymizationMethod,
-        FaceAnonymizer,
-    )
-    from ai_core.face_detection.face_detector import FaceDetector
-    from ai_core.face_tracking.face_tracker import ByteTracker
+from ai_core.face_anonymization.face_anonymizer import (
+    AnonymizationMethod,
+    FaceAnonymizer,
+)
+from ai_core.face_detection.face_detector import FaceDetector
+from ai_core.face_tracking.face_tracker import ByteTracker
 
 
 def _build_parser() -> argparse.ArgumentParser:

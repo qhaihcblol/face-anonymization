@@ -5,9 +5,9 @@ from typing import Any
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from ai_core.face_detection.face_detector import FaceDetection
 
 __all__ = ["ByteTracker"]
-from ai_core.face_detection.face_detector import FaceDetection
 
 
 def _xyxy_to_cxcywh(boxes: np.ndarray) -> np.ndarray:
