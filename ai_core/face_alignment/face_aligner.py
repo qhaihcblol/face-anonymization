@@ -163,3 +163,37 @@ class FaceAligner:
             left_mouth=(float(points[3, 0]), float(points[3, 1])),
             right_mouth=(float(points[4, 0]), float(points[4, 1])),
         )
+    def warp_face(
+        self,
+        image: np.ndarray,
+        matrix: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Warp image into canonical aligned face space.
+
+        Args:
+            image:
+                Source image in HWC format.
+            matrix:
+                Affine transform matrix with shape (2, 3).
+
+        Returns:
+            Aligned face image with shape (H, W, C).
+        """
+        if image.ndim not in (2, 3):
+            raise ValueError("image must have shape (H, W) or (H, W, C)")
+
+        matrix = np.asarray(matrix, dtype=np.float32)
+        if matrix.shape != (2, 3):
+            raise ValueError("matrix must have shape (2, 3)")
+
+        width, height = self.output_size
+
+        return cv2.warpAffine(
+            image,
+            matrix,
+            dsize=(width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
