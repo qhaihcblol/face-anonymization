@@ -146,3 +146,5 @@ class FaceAnonymizer:
             AnonymizationMethod.BLACKOUT: self._blackout,
         }
         return method_map[method_value](image, detections)
+
+    # def anonymize_with_model(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:

@@ -212,5 +212,24 @@ class VideoAnonymization:
             throughput_fps=throughput_fps,
         )
 
-    def anonymize_video_with_model(self) -> None:  # face swapping, etc.
-        raise NotImplementedError("Model-based video anonymization is not implemented")
+    # def anonymize_video_with_model(
+    #     self,
+    #     input_path: str | Path,
+    #     output_path: str | Path | None = None,
+    #     *,
+    #     method: AnonymizationMethod | str = AnonymizationMethod.BLUR,
+    #     detect_interval: int = 1,
+    #     target_fps: int | None = None,
+    #     start_sec: float | None = None,
+    #     end_sec: float | None = None,
+    #     blur_new: bool = False,
+    #     draw_tracks: bool = False,
+    #     codec: str = "H264",
+    #     progress_every: int = 60,
+    # ) -> VideoAnonymizationResult:
+    #     return VideoAnonymizationResult(
+    #         output_path=output_path,
+    #         output_metadata=output_meta,
+    #         elapsed_sec=elapsed,
+    #         throughput_fps=throughput_fps,
+    #     )

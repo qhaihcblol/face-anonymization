@@ -23,7 +23,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--onnx",
         type=Path,
-        default=Path(__file__).resolve().parent
+        default=Path(__file__).resolve().parent.parent
+        / "ai_core"
         / "face_detection"
         / "onnx"
         / "retinaface_best.onnx",
