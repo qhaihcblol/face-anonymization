@@ -74,6 +74,22 @@ class FaceAligner:
             matrix=matrix,
         )
 
+    def align_and_warp(
+        self,
+        image: np.ndarray,
+        detection: FaceDetection,
+    ) -> tuple[AlignedFace, np.ndarray]:
+        aligned = self.align_detection(detection)
+        aligned_image = self.warp_face(image, aligned.matrix)
+        return aligned, aligned_image
+
+    def align_and_warp_batch(
+        self,
+        image: np.ndarray,
+        detections: Sequence[FaceDetection],
+    ) -> list[tuple[AlignedFace, np.ndarray]]:
+        return [self.align_and_warp(image, det) for det in detections]
+
     def _estimate_matrix(self, landmarks: np.ndarray) -> np.ndarray:
         matrix, _ = cv2.estimateAffinePartial2D(
             landmarks,
@@ -97,6 +113,22 @@ class FaceAligner:
         ones = np.ones((points.shape[0], 1), dtype=np.float32)
         points_h = np.concatenate([points, ones], axis=1)
         return points_h @ matrix.T
+
+    @staticmethod
+    def invert_matrix(matrix: np.ndarray) -> np.ndarray:
+        matrix = np.asarray(matrix, dtype=np.float32)
+        if matrix.shape != (2, 3):
+            raise ValueError("matrix must have shape (2, 3)")
+        return np.asarray(cv2.invertAffineTransform(matrix), dtype=np.float32)
+
+    @classmethod
+    def inverse_transform_points(
+        cls,
+        points: np.ndarray,
+        matrix: np.ndarray,
+    ) -> np.ndarray:
+        inverse_matrix = cls.invert_matrix(matrix)
+        return cls.transform_points(points, inverse_matrix)
 
     @classmethod
     def transform_bbox(
@@ -127,6 +159,15 @@ class FaceAligner:
             float(max_xy[0]),
             float(max_xy[1]),
         )
+
+    @classmethod
+    def inverse_transform_bbox(
+        cls,
+        bbox: tuple[float, float, float, float],
+        matrix: np.ndarray,
+    ) -> tuple[float, float, float, float]:
+        inverse_matrix = cls.invert_matrix(matrix)
+        return cls.transform_bbox(bbox, inverse_matrix)
 
     @classmethod
     def _scaled_reference(cls, output_size: tuple[int, int]) -> np.ndarray:
@@ -163,6 +204,7 @@ class FaceAligner:
             left_mouth=(float(points[3, 0]), float(points[3, 1])),
             right_mouth=(float(points[4, 0]), float(points[4, 1])),
         )
+
     def warp_face(
         self,
         image: np.ndarray,
@@ -197,3 +239,58 @@ class FaceAligner:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
+
+    def warp_back_to_frame(
+        self,
+        aligned_image: np.ndarray,
+        inverse_matrix: np.ndarray,
+        frame_shape: tuple[int, ...],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Warp aligned-face output back to original frame space.
+
+        Args:
+            aligned_image:
+                Face image in aligned space.
+            inverse_matrix:
+                Affine transform from aligned space -> original frame space.
+            frame_shape:
+                Shape of original frame (H, W) or (H, W, C).
+
+        Returns:
+            Tuple of:
+            - warped image in original frame size
+            - uint8 binary mask (255 where aligned image is projected)
+        """
+        if aligned_image.ndim not in (2, 3):
+            raise ValueError("aligned_image must have shape (H, W) or (H, W, C)")
+
+        if len(frame_shape) < 2:
+            raise ValueError("frame_shape must contain at least (H, W)")
+        frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+        if frame_h <= 0 or frame_w <= 0:
+            raise ValueError("frame_shape values must be > 0")
+
+        inverse_matrix = np.asarray(inverse_matrix, dtype=np.float32)
+        if inverse_matrix.shape != (2, 3):
+            raise ValueError("inverse_matrix must have shape (2, 3)")
+
+        warped = cv2.warpAffine(
+            aligned_image,
+            inverse_matrix,
+            dsize=(frame_w, frame_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+        source_mask = np.full(aligned_image.shape[:2], 255, dtype=np.uint8)
+        mask = cv2.warpAffine(
+            source_mask,
+            inverse_matrix,
+            dsize=(frame_w, frame_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return warped, mask
