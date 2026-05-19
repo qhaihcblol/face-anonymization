@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 
 from ai_core.face_alignment.face_aligner import FaceAligner
-from ai_core.face_detection.face_detector import FaceDetector, FaceDetection
+from ai_core.face_detection.face_detector import FaceDetector
 
 
 def main():
@@ -11,9 +11,9 @@ def main():
         onnx_path="ai_core/face_detection/onnx/retinaface_best.onnx"
     )
 
-    aligner = FaceAligner()
+    aligner = FaceAligner(output_size=(256, 256), scale_factor=0.8)
 
-    image_path = "test_images/test1.jpg"
+    image_path = "test_images/test_image.jpg"
 
     image = cv2.imread(image_path)
 
@@ -32,19 +32,8 @@ def main():
     output_dir = Path("test_images")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # lưu ảnh gốc để visualize bbox
-    vis_image = image.copy()
+    vis_image = detector.draw(image,detections=detections)
 
-    for idx, detection in enumerate(detections):
-        x1, y1, x2, y2 = map(int, detection.bbox)
-
-        cv2.rectangle(
-            vis_image,
-            (x1, y1),
-            (x2, y2),
-            (0, 255, 0),
-            2,
-        )
 
     for idx, (aligned_face, warped_face) in enumerate(aligned_results):
         # warped_face đang là RGB

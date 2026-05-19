@@ -32,6 +32,9 @@ class FaceAligner:
 
     Input is the detector output (`FaceDetection`). Output coordinates are in
     the aligned target space, not in the original image space.
+
+    Use `scale_factor` < 1.0 to make the face smaller in the output and include
+    more background around the face.
     """
 
     _BASE_SIZE: tuple[int, int] = (112, 112)
@@ -50,10 +53,15 @@ class FaceAligner:
         self,
         output_size: tuple[int, int] = (112, 112),
         reference_landmarks: np.ndarray | None = None,
+        scale_factor: float = 1.0,
     ) -> None:
         self.output_size = self._validate_output_size(output_size)
+        self.scale_factor = self._validate_scale_factor(scale_factor)
+
         if reference_landmarks is None:
-            self.reference_landmarks = self._scaled_reference(self.output_size)
+            self.reference_landmarks = self._scaled_reference(
+                self.output_size, self.scale_factor
+            )
         else:
             self.reference_landmarks = self._validate_landmarks(reference_landmarks)
 
@@ -170,11 +178,30 @@ class FaceAligner:
         return cls.transform_bbox(bbox, inverse_matrix)
 
     @classmethod
-    def _scaled_reference(cls, output_size: tuple[int, int]) -> np.ndarray:
+    def _scaled_reference(
+        cls,
+        output_size: tuple[int, int],
+        scale_factor: float = 1.0,
+    ) -> np.ndarray:
         out_w, out_h = output_size
         base_w, base_h = cls._BASE_SIZE
+
+        # Calculate center of the reference landmarks
+        center = cls._BASE_REFERENCE.mean(axis=0)
+
+        # Scale landmarks around the center
+        scaled = (cls._BASE_REFERENCE - center) * scale_factor + center
+
+        # Apply output size scaling
         scale = np.asarray([out_w / base_w, out_h / base_h], dtype=np.float32)
-        return cls._BASE_REFERENCE * scale
+        return scaled * scale
+
+    @staticmethod
+    def _validate_scale_factor(scale_factor: float) -> float:
+        scale = float(scale_factor)
+        if scale <= 0:
+            raise ValueError("scale_factor must be > 0")
+        return scale
 
     @staticmethod
     def _validate_output_size(output_size: tuple[int, int]) -> tuple[int, int]:
