@@ -71,7 +71,7 @@ class FaceDetector:
         intra_op_num_threads: int | None = None,
     ) -> None:
         self.onnx_path = Path(onnx_path)
-        if not self.onnx_path.exists():
+        if not self.onnx_path.is_file():
             raise FileNotFoundError(f"ONNX model not found: {self.onnx_path}")
 
         if top_k < 0:

@@ -120,7 +120,7 @@ class FaceAnonymizer:
         output[mask > 0] = (0, 0, 0)
         return output
 
-    def anonymize_without_model(
+    def anonymize(
         self,
         image: np.ndarray,
         detections: list[dict[str, Any]],
@@ -146,5 +146,3 @@ class FaceAnonymizer:
             AnonymizationMethod.BLACKOUT: self._blackout,
         }
         return method_map[method_value](image, detections)
-
-    # def anonymize_with_model(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:

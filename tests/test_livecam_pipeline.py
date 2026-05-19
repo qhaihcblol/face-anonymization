@@ -111,7 +111,7 @@ def main() -> None:
         else:
             tracks_for_blur = [t for t in tracks if t.get("state") == "Tracked"]
 
-        anonymized = anonymizer.anonymize_without_model(
+        anonymized = anonymizer.anonymize(
             frame_bgr,
             tracks_for_blur,
             method=AnonymizationMethod.BLUR,

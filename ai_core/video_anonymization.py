@@ -97,7 +97,7 @@ class VideoAnonymization:
                     track for track in tracks if track.get("state") == "Tracked"
                 ]
 
-            anonymized = self.face_anonymizer.anonymize_without_model(
+            anonymized = self.face_anonymizer.anonymize(
                 frame_bgr,
                 tracks_for_anonymize,
                 method=method,
