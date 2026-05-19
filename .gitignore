@@ -1,1 +1,20 @@
-Nothing needs to be added to .gitignore since only a Python source file was modified and no build artifacts, dependencies, or temporary files were detected in the changes.
+.conda/
+
+*.onnx
+*.onnx.data
+
+__pycache__/
+*.pyc
+*.pyo
+
+test_videos/*
+!test_videos/.gitkeep
+
+outputs/*
+!outputs/.gitkeep
+
+webapp/backend/venv/
+webapp/backend/.env
+
+test_images/*
+*.mp4
