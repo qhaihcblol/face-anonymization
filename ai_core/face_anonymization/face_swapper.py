@@ -4,7 +4,7 @@ import cv2
 class FaceSwapper:
     def __init__(
         self,
-        onnx_path: str | Path,
+        pth_path: str | Path,
         *,
         target_size: tuple[int, int] = (256, 256),
         source_size: tuple[int, int] = (112, 112)
@@ -12,9 +12,9 @@ class FaceSwapper:
         self.target_size = target_size
         self.source_size = source_size
         
-        self.onnx_path = Path(onnx_path)
-        if not self.onnx_path.is_file():
-            raise FileNotFoundError(f"ONNX model file not found: {onnx_path}")
+        self.pth_path = Path(pth_path)
+        if not self.pth_path.is_file():
+            raise FileNotFoundError(f"ONNX model file not found: {pth_path}")
     def swap_face(self, source_image: np.ndarray, target_image: np.ndarray) -> np.ndarray:
         # Placeholder for face swapping logic using the ONNX model
         # This function should implement the actual face swapping algorithm

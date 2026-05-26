@@ -11,9 +11,9 @@ def main():
         onnx_path="ai_core/face_detection/onnx/retinaface_best.onnx"
     )
 
-    aligner = FaceAligner(output_size=(256, 256), scale_factor=0.8)
+    aligner = FaceAligner(output_size=(256, 256), mode="ffhq")
 
-    image_path = "test_images/test_image.jpg"
+    image_path = "test_images/test4.jpg"
 
     image = cv2.imread(image_path)
 
