@@ -1,8 +1,17 @@
+from __future__ import annotations
+
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 import cv2
 import numpy as np
+
+from ai_core.face_anonymization.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
+
+if TYPE_CHECKING:
+    from ai_core.face_alignment.face_aligner import AlignedFace
+
+SOURCE_FACE = DEFAULT_SOURCE_FACE
 
 
 class AnonymizationMethod(Enum):
@@ -11,6 +20,7 @@ class AnonymizationMethod(Enum):
     PIXELATE = "pixelate"
     MASK = "mask"
     BLACKOUT = "blackout"
+    SWAP = "swap"
 
 
 class FaceAnonymizer:
@@ -19,6 +29,7 @@ class FaceAnonymizer:
         blur_strength: int = 31,
         pixelation_level: int = 16,
         mask_color: tuple[int, int, int] = (160, 160, 160),
+        face_swapper: FaceSwapper | None = None,
     ) -> None:
         self.blur_strength = max(int(blur_strength), 3)
         if self.blur_strength % 2 == 0:
@@ -26,6 +37,7 @@ class FaceAnonymizer:
 
         self.pixelation_level = max(int(pixelation_level), 4)
         self.mask_color = tuple(int(np.clip(c, 0, 255)) for c in mask_color)
+        self.face_swapper = face_swapper
 
     def _iter_valid_bboxes(
         self,
@@ -120,6 +132,29 @@ class FaceAnonymizer:
         output[mask > 0] = (0, 0, 0)
         return output
 
+    def swap_face(
+        self,
+        image: np.ndarray,
+        aligned_faces: Sequence["AlignedFace"],
+    ) -> np.ndarray:
+        """Replace every aligned face in ``image`` with the source identity.
+
+        Uses the BlendSwap (blendface) model via the configured
+        :class:`~ai_core.face_anonymization.face_swapper.FaceSwapper`. The source
+        identity is taken from ``source_img.png`` and ``aligned_faces`` are the
+        target faces (as produced by ``FaceAligner``).
+        """
+        if self.face_swapper is None:
+            raise RuntimeError(
+                "Face swap requires a FaceSwapper. Construct FaceAnonymizer with "
+                "face_swapper=FaceSwapper(detector=...)."
+            )
+        if not isinstance(image, np.ndarray):
+            raise TypeError("image must be numpy.ndarray")
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("image must have shape (H, W, 3)")
+        return self.face_swapper.swap_face(image, aligned_faces)
+
     def anonymize(
         self,
         image: np.ndarray,
@@ -137,6 +172,12 @@ class FaceAnonymizer:
 
         if not isinstance(method_value, AnonymizationMethod):
             raise TypeError("method must be AnonymizationMethod or str")
+
+        if method_value is AnonymizationMethod.SWAP:
+            raise ValueError(
+                "SWAP operates on aligned faces, not bbox detections. "
+                "Call FaceAnonymizer.swap_face(image, aligned_faces) instead."
+            )
 
         method_map = {
             AnonymizationMethod.NONE: self._none,
