@@ -5,8 +5,10 @@ from pathlib import Path
 import time
 from typing import Iterator
 
+import cv2
 import numpy as np
 
+from ai_core.face_alignment.face_aligner import AlignMode, FaceAligner
 from ai_core.face_anonymization.face_anonymizer import (
     AnonymizationMethod,
     FaceAnonymizer,
@@ -31,11 +33,21 @@ class VideoAnonymization:
         face_detector: FaceDetector,
         face_tracker: ByteTracker,
         face_anonymizer: FaceAnonymizer,
+        face_aligner: FaceAligner | None = None,
     ) -> None:
         self.video_io = video_io
         self.face_detector = face_detector
         self.face_tracker = face_tracker
         self.face_anonymizer = face_anonymizer
+        # Aligner is only needed for the model-based (face swap) path.
+        self.face_aligner = face_aligner
+
+    def _resolve_face_aligner(self) -> FaceAligner:
+        # BlendSwap expects the FFHQ template at 256x256; FaceSwapper re-derives the
+        # crop from the original 5-point landmarks, so any valid alignment works.
+        if self.face_aligner is None:
+            self.face_aligner = FaceAligner(output_size=(256, 256), mode=AlignMode.FFHQ)
+        return self.face_aligner
 
     @staticmethod
     def _resolve_output_path(input_path: Path, output_path: Path | None) -> Path:
@@ -212,24 +224,124 @@ class VideoAnonymization:
             throughput_fps=throughput_fps,
         )
 
-    # def anonymize_video_with_model(
-    #     self,
-    #     input_path: str | Path,
-    #     output_path: str | Path | None = None,
-    #     *,
-    #     method: AnonymizationMethod | str = AnonymizationMethod.BLUR,
-    #     detect_interval: int = 1,
-    #     target_fps: int | None = None,
-    #     start_sec: float | None = None,
-    #     end_sec: float | None = None,
-    #     blur_new: bool = False,
-    #     draw_tracks: bool = False,
-    #     codec: str = "H264",
-    #     progress_every: int = 60,
-    # ) -> VideoAnonymizationResult:
-    #     return VideoAnonymizationResult(
-    #         output_path=output_path,
-    #         output_metadata=output_meta,
-    #         elapsed_sec=elapsed,
-    #         throughput_fps=throughput_fps,
-    #     )
+    def _iter_swapped_frames(
+        self,
+        frames: Iterator[np.ndarray],
+        aligner: FaceAligner,
+        progress_every: int,
+    ) -> Iterator[np.ndarray]:
+        # Face swap needs fresh 5-point landmarks every frame, so the detector runs
+        # on each frame (the Kalman tracker only predicts bboxes, not landmarks).
+        frame_idx = 0
+        last_detect_ms = 0.0
+        last_face_count = 0
+
+        for frame_bgr in frames:
+            t0 = time.perf_counter()
+            detections = self.face_detector.detect(frame_bgr)
+            last_detect_ms = (time.perf_counter() - t0) * 1000.0
+            last_face_count = len(detections)
+
+            if detections:
+                aligned_faces = aligner.align(detections)
+                # VideoIO yields BGR; BlendSwap operates in RGB.
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                swapped_rgb = self.face_anonymizer.swap_face(frame_rgb, aligned_faces)
+                output_frame = cv2.cvtColor(swapped_rgb, cv2.COLOR_RGB2BGR)
+            else:
+                output_frame = frame_bgr
+
+            frame_idx += 1
+            if progress_every > 0 and frame_idx % progress_every == 0:
+                print(
+                    f"Processed {frame_idx} frames "
+                    f"| detect: {last_detect_ms:5.1f} ms "
+                    f"| faces: {last_face_count}"
+                )
+
+            yield output_frame
+
+    def anonymize_video_with_model(
+        self,
+        input_path: str | Path,
+        output_path: str | Path | None = None,
+        *,
+        target_fps: int | None = None,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+        codec: str = "H264",
+        progress_every: int = 60,
+    ) -> VideoAnonymizationResult:
+        if self.face_anonymizer.face_swapper is None:
+            raise RuntimeError(
+                "anonymize_video_with_model requires a FaceAnonymizer configured with "
+                "a FaceSwapper (face_anonymizer=FaceAnonymizer(face_swapper=...))."
+            )
+
+        input_path = Path(input_path)
+        if output_path is not None:
+            output_path = Path(output_path)
+        else:
+            output_path = Path("outputs") / f"swapped_{input_path.stem}.mp4"
+
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input video not found: {input_path}")
+
+        aligner = self._resolve_face_aligner()
+        source_meta = self.video_io.get_video_metadata(str(input_path))
+        output_fps = self._resolve_output_fps(source_meta.fps, target_fps)
+
+        print(f"Input: {input_path}")
+        print(
+            "Source metadata: "
+            f"{source_meta.width}x{source_meta.height}, "
+            f"{source_meta.fps:.3f} FPS, {source_meta.frame_count} frames"
+        )
+        print(f"Output: {output_path}")
+        print("Anonymization method: swap (BlendSwap)")
+        print(f"Output FPS: {output_fps:.3f}")
+
+        # Prepare the source identity once up-front so any source issues surface early.
+        self.face_anonymizer.face_swapper.prepare_source()
+
+        source_frames = self.video_io.iter_frames(
+            str(input_path),
+            start_sec=start_sec,
+            end_sec=end_sec,
+            target_fps=target_fps,
+        )
+        processed_frames = self._iter_swapped_frames(
+            frames=source_frames,
+            aligner=aligner,
+            progress_every=progress_every,
+        )
+
+        t0 = time.perf_counter()
+        output_meta = self.video_io.write_frames(
+            frames=processed_frames,
+            output_path=str(output_path),
+            fps=output_fps,
+            codec=codec,
+        )
+        elapsed = time.perf_counter() - t0
+        throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0
+
+        print("Done.")
+        print(
+            "Output metadata: "
+            f"{output_meta.width}x{output_meta.height}, "
+            f"{output_meta.fps:.3f} FPS, "
+            f"{output_meta.frame_count} frames, "
+            f"{output_meta.duration_sec:.2f} sec"
+        )
+        print(
+            f"Elapsed: {elapsed:.2f} sec "
+            f"| Pipeline throughput: {throughput_fps:.2f} FPS"
+        )
+
+        return VideoAnonymizationResult(
+            output_path=output_path,
+            output_metadata=output_meta,
+            elapsed_sec=elapsed,
+            throughput_fps=throughput_fps,
+        )
