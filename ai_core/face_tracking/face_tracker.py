@@ -114,7 +114,12 @@ class Track:
 
     _id_counter: int = 0
 
-    def __init__(self, bbox_xyxy: np.ndarray, score: float) -> None:
+    def __init__(
+        self,
+        bbox_xyxy: np.ndarray,
+        score: float,
+        landmarks: np.ndarray | None = None,
+    ) -> None:
         Track._id_counter += 1
         self.track_id: int = Track._id_counter
 
@@ -124,6 +129,12 @@ class Track:
         self.bbox_xyxy: np.ndarray = bbox_xyxy.astype(np.float32)
         self.score: float = float(score)
         self.state: TrackState = TrackState.New
+        # Last associated 5-point landmarks (None until a detection carries them).
+        # Kept so the anonymizer can align faces for precise (parser) masks; carried
+        # forward unchanged on predict-only frames.
+        self.landmarks: np.ndarray | None = (
+            None if landmarks is None else np.asarray(landmarks, dtype=np.float32)
+        )
 
         self.hits: int = 1
         self.consecutive: int = 1
@@ -134,11 +145,18 @@ class Track:
         pred_cxcywh = self.kalman.predict()
         self.bbox_xyxy = _cxcywh_to_xyxy(pred_cxcywh)
 
-    def update(self, bbox_xyxy: np.ndarray, score: float) -> None:
+    def update(
+        self,
+        bbox_xyxy: np.ndarray,
+        score: float,
+        landmarks: np.ndarray | None = None,
+    ) -> None:
         """Run Kalman correction with a matched detection."""
         self.kalman.update(_xyxy_to_cxcywh(bbox_xyxy))
         self.bbox_xyxy = _cxcywh_to_xyxy(self.kalman.x[:4])
         self.score = float(score)
+        if landmarks is not None:
+            self.landmarks = np.asarray(landmarks, dtype=np.float32)
         self.hits += 1
         self.consecutive += 1
         self.frames_lost = 0
@@ -163,6 +181,7 @@ class Track:
             "bbox": self.bbox_xyxy.tolist(),
             "score": self.score,
             "state": self.state.name,
+            "landmarks": None if self.landmarks is None else self.landmarks.tolist(),
         }
 
 
@@ -183,7 +202,7 @@ def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def _associate(
     tracks: list[Track],
-    detections: list[tuple[np.ndarray, float]],
+    detections: list[tuple[np.ndarray, float, np.ndarray | None]],
     iou_thresh: float,
     gate_mahal: float,
 ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
@@ -288,19 +307,25 @@ class ByteTracker:
         """Process one detection frame and return active tracks."""
         self.frame_id += 1
 
-        # 1) Split detections by confidence.
-        dets_high: list[tuple[np.ndarray, float]] = []
-        dets_low: list[tuple[np.ndarray, float]] = []
+        # 1) Split detections by confidence. Landmarks ride along so the matched
+        #    track keeps the 5-point geometry the anonymizer needs for precise masks.
+        dets_high: list[tuple[np.ndarray, float, np.ndarray | None]] = []
+        dets_low: list[tuple[np.ndarray, float, np.ndarray | None]] = []
         for d in detections:
             bbox = np.asarray(d.bbox, dtype=np.float32)
             if bbox.shape != (4,):
                 continue
 
+            landmarks = None
+            det_landmarks = getattr(d, "landmarks", None)
+            if det_landmarks is not None:
+                landmarks = np.asarray(det_landmarks.as_array(), dtype=np.float32)
+
             score = float(d.score)
             if score >= self.high_thresh:
-                dets_high.append((bbox, score))
+                dets_high.append((bbox, score, landmarks))
             elif score >= self.low_thresh:
-                dets_low.append((bbox, score))
+                dets_low.append((bbox, score, landmarks))
 
         # 2) Predict all track states before matching.
         for t in self._tracked + self._lost:

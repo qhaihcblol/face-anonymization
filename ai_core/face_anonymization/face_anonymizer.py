@@ -7,9 +7,11 @@ import cv2
 import numpy as np
 
 from ai_core.face_anonymization.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
+from ai_core.face_detection.face_detector import FaceDetection, FaceLandmarks
 
 if TYPE_CHECKING:
-    from ai_core.face_alignment.face_aligner import AlignedFace
+    from ai_core.face_alignment.face_aligner import AlignedFace, FaceAligner
+    from ai_core.face_anonymization.face_parser import FaceParser
 
 SOURCE_FACE = DEFAULT_SOURCE_FACE
 
@@ -30,6 +32,12 @@ class FaceAnonymizer:
         pixelation_level: int = 16,
         mask_color: tuple[int, int, int] = (160, 160, 160),
         face_swapper: FaceSwapper | None = None,
+        face_parser: "FaceParser | None" = None,
+        face_aligner: "FaceAligner | None" = None,
+        irreversible: bool = True,
+        noise_strength: float = 12.0,
+        quantization_levels: int = 8,
+        mask_feather: float = 4.0,
     ) -> None:
         self.blur_strength = max(int(blur_strength), 3)
         if self.blur_strength % 2 == 0:
@@ -39,64 +47,219 @@ class FaceAnonymizer:
         self.mask_color = tuple(int(np.clip(c, 0, 255)) for c in mask_color)
         self.face_swapper = face_swapper
 
+        # Optional precise face-region masking: a BiSeNet parser run on an aligned
+        # crop replaces the coarse ellipse with a mask that hugs the real face.
+        # Requires an aligner to produce the crop and warp the mask back to frame.
+        self.face_parser = face_parser
+        self.face_aligner = face_aligner
+        # Soft-edge width (px std-dev) for the ellipse fallback mask.
+        self.mask_feather = max(float(mask_feather), 0.0)
+
+        # Hardening for blur/pixelate so the obfuscated region cannot be recovered.
+        self.irreversible = bool(irreversible)
+        self.noise_strength = max(float(noise_strength), 0.0)
+        self.quantization_levels = max(int(quantization_levels), 0)
+        # Unseeded RNG on purpose: the noise must not be reproducible, otherwise it
+        # could be subtracted back out.
+        self._rng = np.random.default_rng()
+
+    @staticmethod
+    def _valid_bbox(
+        image: np.ndarray,
+        det: dict[str, Any],
+    ) -> tuple[int, int, int, int] | None:
+        """Clip a detection's bbox to the frame, or None if missing/degenerate."""
+        h, w = image.shape[:2]
+        bbox = np.asarray(det.get("bbox", []), dtype=np.float32)
+        if bbox.shape != (4,):
+            return None
+
+        x1, y1, x2, y2 = bbox
+        x1 = int(np.clip(np.floor(x1), 0, max(w - 1, 0)))
+        y1 = int(np.clip(np.floor(y1), 0, max(h - 1, 0)))
+        x2 = int(np.clip(np.ceil(x2), 1, w))
+        y2 = int(np.clip(np.ceil(y2), 1, h))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2, y2)
+
     def _iter_valid_bboxes(
         self,
         image: np.ndarray,
         detections: list[dict[str, Any]],
     ) -> list[tuple[int, int, int, int]]:
-        h, w = image.shape[:2]
         boxes: list[tuple[int, int, int, int]] = []
-
         for det in detections:
-            bbox = np.asarray(det.get("bbox", []), dtype=np.float32)
-            if bbox.shape != (4,):
-                continue
-
-            x1, y1, x2, y2 = bbox
-            x1 = int(np.clip(np.floor(x1), 0, max(w - 1, 0)))
-            y1 = int(np.clip(np.floor(y1), 0, max(h - 1, 0)))
-            x2 = int(np.clip(np.ceil(x2), 1, w))
-            y2 = int(np.clip(np.ceil(y2), 1, h))
-
-            if x2 <= x1 or y2 <= y1:
-                continue
-            boxes.append((x1, y1, x2, y2))
-
+            bbox = self._valid_bbox(image, det)
+            if bbox is not None:
+                boxes.append(bbox)
         return boxes
 
-    def _ellipse(
+    @staticmethod
+    def _landmarks_from(det: dict[str, Any]) -> np.ndarray | None:
+        """Extract a (5, 2) landmark array from a detection/track dict, or None."""
+        raw = det.get("landmarks")
+        if raw is None:
+            return None
+        points = np.asarray(raw, dtype=np.float32)
+        if points.shape != (5, 2) or not np.isfinite(points).all():
+            return None
+        return points
+
+    def _ellipse_face_mask(
+        self,
+        bbox: tuple[int, int, int, int],
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        """Soft elliptical mask (float32 [0, 1]) for one bbox — the coarse fallback."""
+        x1, y1, x2, y2 = bbox
+        mask = np.zeros(shape, dtype=np.float32)
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        axis_x = max((x2 - x1) // 2, 1)
+        axis_y = max(int((y2 - y1) * 0.58), 1)
+        cv2.ellipse(mask, (cx, cy), (axis_x, axis_y), 0, 0, 360, 1.0, -1)
+        if self.mask_feather > 0.0:
+            mask = cv2.GaussianBlur(mask, (0, 0), self.mask_feather)
+        return mask
+
+    def _parser_face_mask(
+        self,
+        image: np.ndarray,
+        landmarks: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        shape: tuple[int, int],
+    ) -> np.ndarray | None:
+        """Precise face-region mask (float32 [0, 1]) via align -> parser -> warp back.
+
+        Returns None on any failure (degenerate landmarks, empty parse) so the caller
+        can fall back to the ellipse and never under-cover the face.
+        """
+        if self.face_parser is None or self.face_aligner is None:
+            return None
+
+        h, w = shape
+        try:
+            detection = FaceDetection(
+                bbox=(float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+                score=1.0,
+                landmarks=FaceLandmarks(
+                    left_eye=(float(landmarks[0, 0]), float(landmarks[0, 1])),
+                    right_eye=(float(landmarks[1, 0]), float(landmarks[1, 1])),
+                    nose=(float(landmarks[2, 0]), float(landmarks[2, 1])),
+                    left_mouth=(float(landmarks[3, 0]), float(landmarks[3, 1])),
+                    right_mouth=(float(landmarks[4, 0]), float(landmarks[4, 1])),
+                ),
+            )
+            aligned = self.face_aligner.align_detection(detection)
+            crop_bgr = self.face_aligner.warp_face(image, aligned.matrix)
+            # Frames flow through this path in BGR; the parser expects RGB.
+            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            region = self.face_parser.compute_mask(crop_rgb)
+        except (ValueError, cv2.error):
+            return None
+
+        # The parser found (almost) no face in the crop -> let the ellipse cover it.
+        if float(region.sum()) < 16.0:
+            return None
+
+        inverse = self.face_aligner.invert_matrix(aligned.matrix)
+        warped = cv2.warpAffine(
+            np.asarray(region, dtype=np.float32),
+            inverse,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return np.clip(warped, 0.0, 1.0)
+
+    def _region_mask(
         self,
         image: np.ndarray,
         detections: list[dict[str, Any]],
     ) -> np.ndarray:
-        mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        for x1, y1, x2, y2 in self._iter_valid_bboxes(image, detections):
-            cx = (x1 + x2) // 2
-            cy = (y1 + y2) // 2
-            axis_x = max((x2 - x1) // 2, 1)
-            axis_y = max(int((y2 - y1) * 0.58), 1)
-            cv2.ellipse(mask, (cx, cy), (axis_x, axis_y), 0, 0, 360, 255, -1)
+        """Combined soft face mask (float32 [0, 1]) over all detections.
+
+        Each face uses the BiSeNet parser when landmarks and a parser are available
+        (precise, hugs the real face), otherwise an elliptical bound. The parser mask
+        also falls back to the ellipse on failure, so the face is never under-covered.
+        Faces are unioned (per-pixel max).
+        """
+        shape = image.shape[:2]
+        mask = np.zeros(shape, dtype=np.float32)
+        for det in detections:
+            bbox = self._valid_bbox(image, det)
+            if bbox is None:
+                continue
+
+            face_mask: np.ndarray | None = None
+            landmarks = self._landmarks_from(det)
+            if landmarks is not None:
+                face_mask = self._parser_face_mask(image, landmarks, bbox, shape)
+            if face_mask is None:
+                face_mask = self._ellipse_face_mask(bbox, shape)
+            mask = np.maximum(mask, face_mask)
         return mask
+
+    @staticmethod
+    def _composite(
+        image: np.ndarray,
+        content: np.ndarray,
+        mask: np.ndarray,
+    ) -> np.ndarray:
+        """Alpha-blend ``content`` over ``image`` using a soft float mask."""
+        alpha = mask[..., None]
+        blended = image.astype(np.float32) * (1.0 - alpha) + content.astype(
+            np.float32
+        ) * alpha
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
+    def _destroy(self, region: np.ndarray) -> np.ndarray:
+        """Make an obfuscated region non-recoverable.
+
+        Quantization is a lossy, non-linear step that discards the fine gradient
+        information a deconvolution would need (and it survives temporal averaging
+        across video frames). Additive, unseeded, unstored noise then makes any
+        inverse problem ill-posed. Together they stop blur/pixelation from being
+        decoded back to the original face.
+        """
+        if not self.irreversible:
+            return region
+
+        out = region.astype(np.float32)
+        if self.quantization_levels > 0:
+            step = 256.0 / self.quantization_levels
+            out = np.floor(out / step) * step + step / 2.0
+        if self.noise_strength > 0.0:
+            out = out + self._rng.normal(0.0, self.noise_strength, size=out.shape)
+        return np.clip(out, 0, 255).astype(np.uint8)
 
     def _none(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
         return image
 
     def _blur(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
-        mask = self._ellipse(image, detections)
+        mask = self._region_mask(image, detections)
         if not np.any(mask):
             return image
 
         blurred = cv2.GaussianBlur(image, (self.blur_strength, self.blur_strength), 0)
-        output = image.copy()
-        output[mask > 0] = blurred[mask > 0]
-        return output
+        blurred = self._destroy(blurred)
+        return self._composite(image, blurred, mask)
 
     def _pixelate(
         self, image: np.ndarray, detections: list[dict[str, Any]]
     ) -> np.ndarray:
-        output = image.copy()
-        for x1, y1, x2, y2 in self._iter_valid_bboxes(output, detections):
-            face = output[y1:y2, x1:x2]
+        mask = self._region_mask(image, detections)
+        if not np.any(mask):
+            return image
+
+        # Mosaic the whole bbox region, then composite only the soft face mask back so
+        # the pixelation follows the real face boundary instead of a rectangle.
+        pixelated = image.copy()
+        for x1, y1, x2, y2 in self._iter_valid_bboxes(image, detections):
+            face = pixelated[y1:y2, x1:x2]
             h, w = face.shape[:2]
             if h < 2 or w < 2:
                 continue
@@ -105,32 +268,33 @@ class FaceAnonymizer:
             small_w = max(w // scale, 1)
             small_h = max(h // scale, 1)
 
-            pixelated = cv2.resize(
+            small = cv2.resize(
                 face, (small_w, small_h), interpolation=cv2.INTER_LINEAR
             )
-            pixelated = cv2.resize(pixelated, (w, h), interpolation=cv2.INTER_NEAREST)
-            output[y1:y2, x1:x2] = pixelated
-        return output
+            # Degrade the low-res block averages (the part that still leaks identity)
+            # before upscaling, so the mosaic cannot be reconstructed.
+            small = self._destroy(small)
+            blocks = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+            pixelated[y1:y2, x1:x2] = blocks
+        return self._composite(image, pixelated, mask)
 
     def _mask(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
-        mask = self._ellipse(image, detections)
+        mask = self._region_mask(image, detections)
         if not np.any(mask):
             return image
 
-        output = image.copy()
-        output[mask > 0] = self.mask_color
-        return output
+        solid = np.empty_like(image)
+        solid[:] = self.mask_color
+        return self._composite(image, solid, mask)
 
     def _blackout(
         self, image: np.ndarray, detections: list[dict[str, Any]]
     ) -> np.ndarray:
-        mask = self._ellipse(image, detections)
+        mask = self._region_mask(image, detections)
         if not np.any(mask):
             return image
 
-        output = image.copy()
-        output[mask > 0] = (0, 0, 0)
-        return output
+        return self._composite(image, np.zeros_like(image), mask)
 
     def swap_face(
         self,

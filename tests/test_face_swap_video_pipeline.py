@@ -5,6 +5,8 @@ from pathlib import Path
 
 from ai_core.face_alignment.face_aligner import FaceAligner
 from ai_core.face_anonymization.face_anonymizer import FaceAnonymizer
+from ai_core.face_anonymization.face_parser import FaceParser
+from ai_core.face_anonymization.face_restorer import FaceRestorer
 from ai_core.face_anonymization.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
@@ -49,6 +51,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to blendswap_256.onnx (downloaded from HF if omitted)",
     )
     parser.add_argument(
+        "--no-region-mask",
+        action="store_true",
+        help="Disable BiSeNet face-parsing mask (use the elliptical mask only)",
+    )
+    parser.add_argument(
+        "--parser-model",
+        type=Path,
+        default=None,
+        help="Path to bisenet_resnet_34.onnx (downloaded from HF if omitted)",
+    )
+    parser.add_argument(
+        "--no-restore",
+        action="store_true",
+        help="Disable GFPGAN face restoration (swapped face stays soft)",
+    )
+    parser.add_argument(
+        "--restore-model",
+        type=Path,
+        default=None,
+        help="Path to gfpgan_1.4.onnx (downloaded from HF if omitted)",
+    )
+    parser.add_argument(
+        "--restore-blend",
+        type=float,
+        default=0.8,
+        help="How much restored detail to mix back (0..1)",
+    )
+    parser.add_argument(
         "--target-fps",
         type=int,
         default=None,
@@ -57,10 +87,39 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-sec", type=float, default=None)
     parser.add_argument("--end-sec", type=float, default=None)
     parser.add_argument(
-        "--codec", type=str, default="H264", help="Output video FourCC codec (4 chars)"
+        "--codec", type=str, default="mp4v", help="Output video FourCC codec (4 chars)"
     )
     parser.add_argument(
         "--progress-every", type=int, default=60, help="Print progress every N frames"
+    )
+    parser.add_argument(
+        "--no-stabilize",
+        action="store_true",
+        help="Disable temporal stabilization (per-frame independent swap)",
+    )
+    parser.add_argument(
+        "--smooth-min-cutoff",
+        type=float,
+        default=0.5,
+        help="One-Euro min cutoff (lower = smoother landmarks)",
+    )
+    parser.add_argument(
+        "--smooth-beta",
+        type=float,
+        default=0.05,
+        help="One-Euro beta (higher = more responsive to fast motion)",
+    )
+    parser.add_argument(
+        "--output-smooth",
+        type=float,
+        default=0.4,
+        help="EMA weight on the swapped crop (0 = off, higher = less flicker)",
+    )
+    parser.add_argument(
+        "--mask-smooth",
+        type=float,
+        default=0.5,
+        help="EMA weight on the blend mask (0 = off, higher = steadier edges)",
     )
     return parser
 
@@ -72,10 +131,22 @@ def main() -> None:
         raise FileNotFoundError(f"Input video not found: {args.input}")
 
     detector = FaceDetector(onnx_path=args.onnx)
+    face_parser = (
+        None
+        if args.no_region_mask
+        else FaceParser(model_path=args.parser_model)
+    )
+    face_restorer = (
+        None
+        if args.no_restore
+        else FaceRestorer(model_path=args.restore_model, blend=args.restore_blend)
+    )
     swapper = FaceSwapper(
         detector=detector,
         model_path=args.model,
         source_path=args.source,
+        face_parser=face_parser,
+        face_restorer=face_restorer,
     )
     anonymizer = FaceAnonymizer(face_swapper=swapper)
     video_anonymization = VideoAnonymization(
@@ -94,6 +165,11 @@ def main() -> None:
         end_sec=args.end_sec,
         codec=args.codec,
         progress_every=args.progress_every,
+        stabilize=not args.no_stabilize,
+        smooth_min_cutoff=args.smooth_min_cutoff,
+        smooth_beta=args.smooth_beta,
+        output_smooth=args.output_smooth,
+        mask_smooth=args.mask_smooth,
     )
     print(f"Saved output to: {result.output_path}")
 

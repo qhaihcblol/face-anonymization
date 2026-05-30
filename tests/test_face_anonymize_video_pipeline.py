@@ -61,6 +61,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Mask color in BGR",
     )
     parser.add_argument(
+        "--reversible",
+        action="store_true",
+        help="Disable irreversible hardening of blur/pixelate (NOT privacy-safe)",
+    )
+    parser.add_argument(
+        "--precise-mask",
+        action="store_true",
+        help=(
+            "Use the BiSeNet face parser for a precise, face-hugging mask "
+            "(blur/pixelate/mask/blackout) instead of a coarse ellipse"
+        ),
+    )
+    parser.add_argument(
+        "--parser-model",
+        type=Path,
+        default=None,
+        help="Path to bisenet_resnet_34.onnx (default: auto-download from HF)",
+    )
+    parser.add_argument(
+        "--mask-feather",
+        type=float,
+        default=4.0,
+        help="Soft-edge width (px) for the ellipse fallback mask",
+    )
+    parser.add_argument(
+        "--noise-strength",
+        type=float,
+        default=12.0,
+        help="Std-dev of noise injected into blur/pixelate regions (0 = off)",
+    )
+    parser.add_argument(
+        "--quantization-levels",
+        type=int,
+        default=8,
+        help="Tonal levels for blur/pixelate quantization (0 = off, lower = stronger)",
+    )
+    parser.add_argument(
         "--detect-interval",
         type=int,
         default=1,
@@ -91,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--codec",
         type=str,
-        default="H264",
+        default="mp4v",
         help="Output video FourCC codec (4 chars)",
     )
     parser.add_argument(
@@ -119,10 +156,30 @@ def main() -> None:
         max_lost=args.max_lost,
         min_hits=args.min_hits,
     )
+
+    face_parser = None
+    face_aligner = None
+    if args.precise_mask:
+        # Lazy imports: only needed (and only download the parser model) when the
+        # precise-mask path is requested.
+        from ai_core.face_alignment.face_aligner import AlignMode, FaceAligner
+        from ai_core.face_anonymization.face_parser import FaceParser
+
+        face_parser = FaceParser(model_path=args.parser_model)
+        # FFHQ-512 gives the parser a large, well-centred crop to segment.
+        face_aligner = FaceAligner(output_size=(512, 512), mode=AlignMode.FFHQ)
+        print("Precise mask: BiSeNet face parser enabled (FFHQ-512 alignment)")
+
     anonymizer = FaceAnonymizer(
         blur_strength=args.blur_strength,
         pixelation_level=args.pixelation_level,
         mask_color=tuple(args.mask_color),
+        face_parser=face_parser,
+        face_aligner=face_aligner,
+        irreversible=not args.reversible,
+        noise_strength=args.noise_strength,
+        quantization_levels=args.quantization_levels,
+        mask_feather=args.mask_feather,
     )
     video_anonymization = VideoAnonymization(
         video_io=VideoIO(),

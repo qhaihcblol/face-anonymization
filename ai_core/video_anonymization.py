@@ -13,6 +13,7 @@ from ai_core.face_anonymization.face_anonymizer import (
     AnonymizationMethod,
     FaceAnonymizer,
 )
+from ai_core.face_anonymization.face_swap_stabilizer import FaceSwapStabilizer
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
 from ai_core.video_io.video_io import VideoIO, VideoMetadata
@@ -229,33 +230,38 @@ class VideoAnonymization:
         frames: Iterator[np.ndarray],
         aligner: FaceAligner,
         progress_every: int,
+        stabilizer: FaceSwapStabilizer | None = None,
     ) -> Iterator[np.ndarray]:
         # Face swap needs fresh 5-point landmarks every frame, so the detector runs
         # on each frame (the Kalman tracker only predicts bboxes, not landmarks).
         frame_idx = 0
-        last_detect_ms = 0.0
         last_face_count = 0
 
         for frame_bgr in frames:
             t0 = time.perf_counter()
-            detections = self.face_detector.detect(frame_bgr)
-            last_detect_ms = (time.perf_counter() - t0) * 1000.0
-            last_face_count = len(detections)
 
-            if detections:
-                aligned_faces = aligner.align(detections)
-                # VideoIO yields BGR; BlendSwap operates in RGB.
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                swapped_rgb = self.face_anonymizer.swap_face(frame_rgb, aligned_faces)
-                output_frame = cv2.cvtColor(swapped_rgb, cv2.COLOR_RGB2BGR)
+            if stabilizer is not None:
+                # Stabilizer tracks faces across frames and smooths the landmarks.
+                output_frame = stabilizer.process(frame_bgr)
+                last_face_count = stabilizer.last_face_count
             else:
-                output_frame = frame_bgr
+                detections = self.face_detector.detect(frame_bgr)
+                last_face_count = len(detections)
+                if detections:
+                    aligned_faces = aligner.align(detections)
+                    # VideoIO yields BGR; BlendSwap operates in RGB.
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    swapped_rgb = self.face_anonymizer.swap_face(frame_rgb, aligned_faces)
+                    output_frame = cv2.cvtColor(swapped_rgb, cv2.COLOR_RGB2BGR)
+                else:
+                    output_frame = frame_bgr
 
+            frame_ms = (time.perf_counter() - t0) * 1000.0
             frame_idx += 1
             if progress_every > 0 and frame_idx % progress_every == 0:
                 print(
                     f"Processed {frame_idx} frames "
-                    f"| detect: {last_detect_ms:5.1f} ms "
+                    f"| frame: {frame_ms:6.1f} ms "
                     f"| faces: {last_face_count}"
                 )
 
@@ -271,6 +277,11 @@ class VideoAnonymization:
         end_sec: float | None = None,
         codec: str = "H264",
         progress_every: int = 60,
+        stabilize: bool = True,
+        smooth_min_cutoff: float = 0.5,
+        smooth_beta: float = 0.05,
+        output_smooth: float = 0.4,
+        mask_smooth: float = 0.5,
     ) -> VideoAnonymizationResult:
         if self.face_anonymizer.face_swapper is None:
             raise RuntimeError(
@@ -300,9 +311,22 @@ class VideoAnonymization:
         print(f"Output: {output_path}")
         print("Anonymization method: swap (BlendSwap)")
         print(f"Output FPS: {output_fps:.3f}")
+        print(f"Temporal stabilization: {'on' if stabilize else 'off'}")
 
         # Prepare the source identity once up-front so any source issues surface early.
         self.face_anonymizer.face_swapper.prepare_source()
+
+        stabilizer: FaceSwapStabilizer | None = None
+        if stabilize:
+            stabilizer = FaceSwapStabilizer(
+                detector=self.face_detector,
+                swapper=self.face_anonymizer.face_swapper,
+                freq=output_fps,
+                min_cutoff=smooth_min_cutoff,
+                beta=smooth_beta,
+                output_smooth=output_smooth,
+                mask_smooth=mask_smooth,
+            )
 
         source_frames = self.video_io.iter_frames(
             str(input_path),
@@ -314,6 +338,7 @@ class VideoAnonymization:
             frames=source_frames,
             aligner=aligner,
             progress_every=progress_every,
+            stabilizer=stabilizer,
         )
 
         t0 = time.perf_counter()

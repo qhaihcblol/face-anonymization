@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 
 from ai_core.face_alignment.face_aligner import AlignedFace, AlignMode, FaceAligner
+from ai_core.face_anonymization.face_parser import FaceParser
+from ai_core.face_anonymization.face_restorer import FaceRestorer
 from ai_core.face_detection.face_detector import (
     FaceDetection,
     FaceDetector,
@@ -50,6 +52,9 @@ class FaceSwapper:
         model_path: str | Path | None = None,
         source_path: str | Path = DEFAULT_SOURCE_FACE,
         mask_blur: float = 0.1,
+        color_correction: bool = True,
+        face_parser: FaceParser | None = None,
+        face_restorer: FaceRestorer | None = None,
         providers: Sequence[str] | None = None,
         intra_op_num_threads: int | None = None,
         hf_repo_id: str = _HF_REPO_ID,
@@ -61,9 +66,19 @@ class FaceSwapper:
         self.detector = detector
         self.source_path = Path(source_path)
         self.mask_blur = float(np.clip(mask_blur, 0.0, 0.49))
+        self.color_correction = bool(color_correction)
+        # Optional BiSeNet face parser; when set, its segmentation replaces the fixed
+        # elliptical mask so the blend hugs the real face and skips occluders.
+        self.face_parser = face_parser
+        # Optional GFPGAN restorer; when set, it sharpens the soft BlendSwap output.
+        self.face_restorer = face_restorer
 
         self.source_aligner = FaceAligner(self._SOURCE_SIZE, AlignMode.INSIGHTFACE)
         self.target_aligner = FaceAligner(self._TARGET_SIZE, AlignMode.FFHQ)
+
+        # Face-shaped (elliptical) feather mask in the aligned 256x256 space. Using a
+        # face-shaped mask instead of the full rectangular crop hides the swap seam.
+        self._face_mask = self._build_face_mask()
 
         self._ort = self._import_onnxruntime()
         self.model_path = self._resolve_model_path(model_path, hf_repo_id, hf_filename)
@@ -129,13 +144,88 @@ class FaceSwapper:
 
         output = image.copy()
         for aligned in aligned_faces:
-            detection = self._recover_detection(aligned)
-            target_aligned, target_crop = self.target_aligner.align_and_warp(
-                image, detection
+            # Re-align to the BlendSwap (FFHQ 256) template regardless of the aligner
+            # mode that produced ``aligned``.
+            target_aligned = self.target_aligner.align_detection(
+                self._recover_detection(aligned)
             )
-            swapped_crop = self._run_model(source_blob, target_crop)
-            output = self._paste_back(output, swapped_crop, target_aligned.matrix)
+            swapped_crop, mask = self.swap_aligned(image, target_aligned)
+            output = self.paste_back(output, swapped_crop, target_aligned.matrix, mask)
         return output
+
+    def swap_aligned(
+        self,
+        image: np.ndarray,
+        aligned: AlignedFace,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Swap a single face; return ``(swapped_crop, blend_mask)`` in 256x256 space.
+
+        ``aligned.matrix`` must come from this swapper's ``target_aligner`` (FFHQ 256).
+        Exposed (and returning the mask alongside the crop) so callers such as the
+        temporal stabilizer can post-process the aligned crop before pasting it back.
+        """
+        image = self._ensure_rgb_uint8(image)
+        source_blob = self._source_blob
+        if source_blob is None:
+            source_blob = self.prepare_source()
+
+        target_crop = self.target_aligner.warp_face(image, aligned.matrix)
+        swapped_crop = self._run_model(source_blob, target_crop)
+        # Restore detail before matching color, so the final tone follows the target.
+        if self.face_restorer is not None:
+            swapped_crop = self.face_restorer.restore(swapped_crop)
+        mask = self._build_blend_mask(target_crop)
+        if self.color_correction:
+            swapped_crop = self._color_transfer(swapped_crop, target_crop, mask)
+        return swapped_crop, mask
+
+    def paste_back(
+        self,
+        base: np.ndarray,
+        swapped_crop: np.ndarray,
+        matrix: np.ndarray,
+        mask: np.ndarray,
+    ) -> np.ndarray:
+        """Warp the swapped crop back to frame space and feather-blend it in."""
+        inverse = FaceAligner.invert_matrix(matrix)
+        h, w = base.shape[:2]
+
+        warped = cv2.warpAffine(
+            swapped_crop,
+            inverse,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        warped_mask = cv2.warpAffine(
+            mask,
+            inverse,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+        alpha = warped_mask[..., None]
+        blended = base.astype(np.float32) * (1.0 - alpha) + warped.astype(np.float32) * alpha
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
+    def _build_blend_mask(self, target_crop: np.ndarray) -> np.ndarray:
+        """Blend mask for one aligned crop: elliptical bound, refined by the parser.
+
+        Returns the elliptical mask when no parser is configured. Otherwise intersects
+        it with the BiSeNet face-region mask so the blend follows the real face and
+        skips occluders, while the ellipse stays a safety bound against parser errors.
+        """
+        if self.face_parser is None:
+            return self._face_mask
+
+        region_mask = self.face_parser.compute_mask(target_crop)
+        # Parser produced (almost) nothing -> fall back to the ellipse.
+        if float(region_mask.sum()) < 16.0:
+            return self._face_mask
+        return np.minimum(self._face_mask, region_mask).astype(np.float32)
 
     # ------------------------------------------------------------------ #
     # Model I/O
@@ -183,49 +273,68 @@ class FaceSwapper:
             landmarks=landmarks,
         )
 
-    def _paste_back(
-        self,
-        base: np.ndarray,
-        swapped_crop: np.ndarray,
-        matrix: np.ndarray,
-    ) -> np.ndarray:
-        """Warp the swapped crop back to frame space and feather-blend it in."""
-        inverse = FaceAligner.invert_matrix(matrix)
-        h, w = base.shape[:2]
+    def _build_face_mask(self) -> np.ndarray:
+        """Elliptical, feathered face mask (float32 [0, 1]) in aligned 256 space.
 
-        warped = cv2.warpAffine(
-            swapped_crop,
-            inverse,
-            (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
+        The ellipse is derived from the fixed FFHQ reference landmarks so it covers
+        forehead-to-chin and both cheeks while staying inside the crop. Feathering it
+        (instead of a rectangular box) removes the visible swap seam.
+        """
+        w, h = self.target_aligner.output_size
+        ref = np.asarray(self.target_aligner.reference_landmarks, dtype=np.float32)
+        eyes_center = ref[:2].mean(axis=0)
+        mouth_center = ref[3:].mean(axis=0)
+        eye_dist = float(np.linalg.norm(ref[1] - ref[0]))
+        vertical = float(np.linalg.norm(mouth_center - eyes_center))
+
+        center_x = float((eyes_center[0] + mouth_center[0]) * 0.5)
+        # Bias the center upward so the forehead is covered.
+        center_y = float((eyes_center[1] + mouth_center[1]) * 0.5 - 0.20 * vertical)
+        axis_x = max(int(round(eye_dist * 1.30)), 1)
+        axis_y = max(int(round(vertical * 1.85)), 1)
+
+        mask = np.zeros((h, w), dtype=np.float32)
+        cv2.ellipse(
+            mask,
+            (int(round(center_x)), int(round(center_y))),
+            (axis_x, axis_y),
+            0,
+            0,
+            360,
+            1.0,
+            thickness=-1,
         )
-        crop_mask = self._feather_mask(swapped_crop.shape[:2])
-        warped_mask = cv2.warpAffine(
-            crop_mask,
-            inverse,
-            (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-
-        alpha = warped_mask[..., None]
-        blended = base.astype(np.float32) * (1.0 - alpha) + warped.astype(np.float32) * alpha
-        return np.clip(blended, 0, 255).astype(np.uint8)
-
-    def _feather_mask(self, size: tuple[int, int]) -> np.ndarray:
-        """Soft-edged box mask (float32 in [0, 1]) for seamless blending."""
-        h, w = int(size[0]), int(size[1])
-        mask = np.ones((h, w), dtype=np.float32)
-        border = max(int(round(min(h, w) * self.mask_blur)), 1)
-        mask[:border, :] = 0.0
-        mask[-border:, :] = 0.0
-        mask[:, :border] = 0.0
-        mask[:, -border:] = 0.0
-        kernel = border * 2 + 1
+        # Feather the boundary.
+        blur = max(int(round(min(w, h) * self.mask_blur)), 1)
+        kernel = blur * 2 + 1
         return cv2.GaussianBlur(mask, (kernel, kernel), 0)
+
+    @staticmethod
+    def _color_transfer(
+        source: np.ndarray,
+        target: np.ndarray,
+        mask: np.ndarray,
+    ) -> np.ndarray:
+        """Match ``source`` (swapped) color stats to ``target`` within ``mask`` (LAB).
+
+        Reinhard-style per-channel mean/std matching so the swapped skin tone and
+        lighting match the surrounding face, hiding the blend boundary.
+        """
+        region = mask > 0.5
+        if int(region.sum()) < 16:
+            return source
+
+        src_lab = cv2.cvtColor(source, cv2.COLOR_RGB2LAB).astype(np.float32)
+        tgt_lab = cv2.cvtColor(target, cv2.COLOR_RGB2LAB).astype(np.float32)
+        for channel in range(3):
+            src_c = src_lab[..., channel]
+            tgt_c = tgt_lab[..., channel]
+            src_mean, src_std = src_c[region].mean(), src_c[region].std() + 1e-6
+            tgt_mean, tgt_std = tgt_c[region].mean(), tgt_c[region].std() + 1e-6
+            src_lab[..., channel] = (src_c - src_mean) * (tgt_std / src_std) + tgt_mean
+
+        src_lab = np.clip(src_lab, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(src_lab, cv2.COLOR_LAB2RGB)
 
     # ------------------------------------------------------------------ #
     # Setup helpers
