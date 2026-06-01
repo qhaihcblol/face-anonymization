@@ -3,13 +3,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Request, UploadFile, status
 from fastapi.responses import FileResponse
 
-from app.api.deps import get_video_service
+from app.api.deps import get_face_swap_service, get_video_service
 from app.schemas.video import (
     VideoAnonymizeRequest,
     VideoAnonymizeResponse,
+    VideoFaceSwapRequest,
+    VideoFaceSwapResponse,
     VideoMetadataPublic,
     VideoUploadResponse,
 )
+from app.services.face_swap_service import FaceSwapService
 from app.services.video_service import VideoPipelineService
 
 
@@ -74,6 +77,40 @@ async def anonymize_video(
         target_fps=payload.target_fps,
         start_sec=payload.start_sec,
         end_sec=payload.end_sec,
+        output_video_url=str(request.url_for("get_anonymized_video", video_id=video_id)),
+        output_metadata=_to_public_metadata(result.output_metadata),
+        elapsed_sec=result.elapsed_sec,
+        throughput_fps=result.throughput_fps,
+    )
+
+
+@router.post("/{video_id}/face-swap", response_model=VideoFaceSwapResponse)
+async def face_swap_video(
+    video_id: str,
+    payload: VideoFaceSwapRequest,
+    request: Request,
+    face_swap_service: FaceSwapService = Depends(get_face_swap_service),
+) -> VideoFaceSwapResponse:
+    result = await face_swap_service.run_face_swap(
+        video_id=video_id,
+        target_fps=payload.target_fps,
+        start_sec=payload.start_sec,
+        end_sec=payload.end_sec,
+        codec=payload.codec,
+        progress_every=payload.progress_every,
+        stabilize=payload.stabilize,
+        smooth_min_cutoff=payload.smooth_min_cutoff,
+        smooth_beta=payload.smooth_beta,
+        output_smooth=payload.output_smooth,
+        mask_smooth=payload.mask_smooth,
+    )
+
+    return VideoFaceSwapResponse(
+        video_id=video_id,
+        target_fps=payload.target_fps,
+        start_sec=payload.start_sec,
+        end_sec=payload.end_sec,
+        stabilize=payload.stabilize,
         output_video_url=str(request.url_for("get_anonymized_video", video_id=video_id)),
         output_metadata=_to_public_metadata(result.output_metadata),
         elapsed_sec=result.elapsed_sec,

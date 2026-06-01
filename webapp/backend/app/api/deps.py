@@ -10,6 +10,7 @@ from app.core.security import decode_access_token
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
+from app.services.face_swap_service import FaceSwapService
 from app.services.video_service import VideoPipelineService
 from app.utils.exceptions import AppException
 
@@ -55,3 +56,13 @@ def get_video_service(request: Request) -> VideoPipelineService:
             detail="Video service is not ready. Please retry shortly.",
         )
     return video_service
+
+
+def get_face_swap_service(request: Request) -> FaceSwapService:
+    face_swap_service = getattr(request.app.state, "face_swap_service", None)
+    if face_swap_service is None:
+        raise AppException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Face swap service is not ready. Please retry shortly.",
+        )
+    return face_swap_service

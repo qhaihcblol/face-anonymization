@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     video_upload_dir: str = "storage/uploads"
     video_output_dir: str = "storage/outputs"
     retinaface_onnx_path: str | None = None
+    blendswap_onnx_path: str | None = None
     video_max_upload_mb: int = 2048
     video_allowed_extensions: list[str] = [".mp4", ".mov", ".webm", ".mkv", ".avi"]
 
@@ -133,6 +134,17 @@ class Settings(BaseSettings):
                 configured = (self.backend_root / configured).resolve()
             return configured
         return (self.ai_core_root / "face_detection" / "onnx" / "retinaface_best.onnx").resolve()
+
+    @property
+    def resolved_blendswap_onnx_path(self) -> Path | None:
+        # When unset, FaceSwapper auto-downloads blendswap_256.onnx from the
+        # FaceFusion Hugging Face hub; an explicit path skips that download.
+        if not self.blendswap_onnx_path:
+            return None
+        configured = Path(self.blendswap_onnx_path)
+        if not configured.is_absolute():
+            configured = (self.backend_root / configured).resolve()
+        return configured
 
     @property
     def resolved_video_upload_dir(self) -> Path:

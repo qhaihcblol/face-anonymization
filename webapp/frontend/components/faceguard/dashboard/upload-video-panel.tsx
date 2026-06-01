@@ -28,15 +28,32 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import {
+  anonymizeVideo,
+  faceSwapVideo,
+  uploadVideo,
+  VideoApiError,
+} from '@/lib/video/client'
+import type { AnonymizeMethod } from '@/lib/video/types'
 
-type FilterPreset = 'none' | 'blur' | 'pixelate' | 'mask' | 'blackout'
+type FilterPreset = AnonymizeMethod | 'swap'
 
-type ProcessingRequest = {
-  method: FilterPreset
-  target_fps: number
-  start_sec?: number
-  end_sec?: number
-  draw_tracks: boolean
+type ProcessingStatus = 'uploading' | 'processing' | null
+
+type LastRun = {
+  filter: FilterPreset
+  targetFps: number
+  startSec?: number
+  endSec?: number
+  drawTracks: boolean
+  stabilize: boolean
+  elapsedSec: number
+}
+
+type ProcessingParams = {
+  targetFps: number
+  startSec?: number
+  endSec?: number
 }
 
 const filterOptions: Array<{ value: FilterPreset; label: string }> = [
@@ -45,14 +62,11 @@ const filterOptions: Array<{ value: FilterPreset; label: string }> = [
   { value: 'pixelate', label: 'Pixelate' },
   { value: 'mask', label: 'Mask' },
   { value: 'blackout', label: 'Blackout' },
+  { value: 'swap', label: 'Face Swap' },
 ]
 
-const resultFilterMap: Record<FilterPreset, string> = {
-  none: 'none',
-  blur: 'blur(14px)',
-  pixelate: 'contrast(1.06) saturate(0.65)',
-  mask: 'none',
-  blackout: 'brightness(0.14) contrast(1.25)',
+function getFilterLabel(value: FilterPreset): string {
+  return filterOptions.find((option) => option.value === value)?.label ?? value
 }
 
 function parseOptionalSecond(value: string, fieldName: string): number | undefined {
@@ -87,14 +101,22 @@ export function UploadVideoPanel() {
   const [startSecInput, setStartSecInput] = useState('')
   const [endSecInput, setEndSecInput] = useState('')
   const [showBoundingBox, setShowBoundingBox] = useState(true)
+  const [stabilize, setStabilize] = useState(true)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [processingStatus, setProcessingStatus] = useState<ProcessingStatus>(null)
   const [processingProgress, setProcessingProgress] = useState(0)
   const [formError, setFormError] = useState<string | null>(null)
-  const [lastRequest, setLastRequest] = useState<ProcessingRequest | null>(null)
+  const [lastRun, setLastRun] = useState<LastRun | null>(null)
 
   const previewUrlRef = useRef<string | null>(null)
   const progressIntervalRef = useRef<number | null>(null)
-  const completionTimeoutRef = useRef<number | null>(null)
+  // The uploaded video is reused across runs so changing only the filter does not
+  // re-upload the file; reset whenever a new file is selected.
+  const uploadedVideoIdRef = useRef<string | null>(null)
+  // Cache-buster: the backend overwrites the same output path on every run.
+  const runCounterRef = useRef(0)
+
+  const isFaceSwap = filter === 'swap'
 
   const selectedFileSizeMB = useMemo(() => {
     if (!selectedFile) {
@@ -106,26 +128,33 @@ export function UploadVideoPanel() {
 
   const queueProgress = selectedFile ? 100 : 0
 
-  const clearProcessingTimers = () => {
+  const stopProgressAnimation = () => {
     if (progressIntervalRef.current !== null) {
       window.clearInterval(progressIntervalRef.current)
       progressIntervalRef.current = null
     }
+  }
 
-    if (completionTimeoutRef.current !== null) {
-      window.clearTimeout(completionTimeoutRef.current)
-      completionTimeoutRef.current = null
-    }
+  const startProgressAnimation = () => {
+    stopProgressAnimation()
+    // Processing is a single blocking request, so animate toward 92% and let the
+    // completion handler snap to 100% when the backend responds.
+    progressIntervalRef.current = window.setInterval(() => {
+      setProcessingProgress((current) => Math.min(92, current + 4))
+    }, 240)
   }
 
   const handleUploadChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null
     setSelectedFile(nextFile)
 
-    clearProcessingTimers()
+    stopProgressAnimation()
+    uploadedVideoIdRef.current = null
     setIsProcessing(false)
+    setProcessingStatus(null)
     setProcessingProgress(0)
     setResultVideoUrl(null)
+    setLastRun(null)
     setFormError(null)
 
     if (previewUrlRef.current) {
@@ -143,36 +172,26 @@ export function UploadVideoPanel() {
     setOriginalVideoUrl(nextPreviewUrl)
   }
 
-  const buildProcessingRequest = (): ProcessingRequest => {
+  const buildProcessingParams = (): ProcessingParams => {
     const targetFps = parseTargetFps(targetFpsInput)
     const startSec = parseOptionalSecond(startSecInput, 'Start sec')
     const endSec = parseOptionalSecond(endSecInput, 'End sec')
 
-    if (
-      startSec !== undefined &&
-      endSec !== undefined &&
-      endSec <= startSec
-    ) {
+    if (startSec !== undefined && endSec !== undefined && endSec <= startSec) {
       throw new Error('End sec must be greater than Start sec.')
     }
 
-    return {
-      method: filter,
-      target_fps: targetFps,
-      start_sec: startSec,
-      end_sec: endSec,
-      draw_tracks: showBoundingBox,
-    }
+    return { targetFps, startSec, endSec }
   }
 
-  const activateGuard = () => {
-    if (!originalVideoUrl || !selectedFile) {
+  const activateGuard = async () => {
+    if (!selectedFile || isProcessing) {
       return
     }
 
-    let requestPayload: ProcessingRequest
+    let params: ProcessingParams
     try {
-      requestPayload = buildProcessingRequest()
+      params = buildProcessingParams()
     } catch (error) {
       setFormError(
         error instanceof Error ? error.message : 'Invalid processing parameters.',
@@ -181,29 +200,70 @@ export function UploadVideoPanel() {
     }
 
     setFormError(null)
-    setLastRequest(requestPayload)
-
-    clearProcessingTimers()
-    setIsProcessing(true)
-    setProcessingProgress(8)
     setResultVideoUrl(null)
+    setIsProcessing(true)
+    setProcessingProgress(6)
+    startProgressAnimation()
 
-    // Placeholder processing simulation. Replace with API call when backend endpoint is ready.
-    progressIntervalRef.current = window.setInterval(() => {
-      setProcessingProgress((current) => Math.min(94, current + 8))
-    }, 160)
+    try {
+      setProcessingStatus('uploading')
+      let videoId = uploadedVideoIdRef.current
+      if (!videoId) {
+        const uploaded = await uploadVideo(selectedFile)
+        videoId = uploaded.video_id
+        uploadedVideoIdRef.current = videoId
+      }
 
-    completionTimeoutRef.current = window.setTimeout(() => {
-      clearProcessingTimers()
+      setProcessingStatus('processing')
+      const result = isFaceSwap
+        ? await faceSwapVideo(videoId, {
+            target_fps: params.targetFps,
+            start_sec: params.startSec,
+            end_sec: params.endSec,
+            stabilize,
+          })
+        : await anonymizeVideo(videoId, {
+            method: filter,
+            target_fps: params.targetFps,
+            start_sec: params.startSec,
+            end_sec: params.endSec,
+            draw_tracks: showBoundingBox,
+          })
+
+      runCounterRef.current += 1
+      // The backend overwrites the same output file each run, so cache-bust the URL.
+      const separator = result.output_video_url.includes('?') ? '&' : '?'
+      const bustedUrl = `${result.output_video_url}${separator}v=${runCounterRef.current}`
+      const elapsedSec = result.elapsed_sec
+      stopProgressAnimation()
       setProcessingProgress(100)
-      setResultVideoUrl(originalVideoUrl)
+      setResultVideoUrl(bustedUrl)
+      setLastRun({
+        filter,
+        targetFps: params.targetFps,
+        startSec: params.startSec,
+        endSec: params.endSec,
+        drawTracks: showBoundingBox,
+        stabilize,
+        elapsedSec,
+      })
+    } catch (error) {
+      stopProgressAnimation()
+      setProcessingProgress(0)
+      setFormError(
+        error instanceof VideoApiError
+          ? error.message
+          : 'Processing failed. Please try again.',
+      )
+    } finally {
+      setProcessingStatus(null)
       setIsProcessing(false)
-    }, 2600)
+    }
   }
 
   useEffect(() => {
     return () => {
-      clearProcessingTimers()
+      stopProgressAnimation()
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current)
       }
@@ -309,6 +369,12 @@ export function UploadVideoPanel() {
                 ))}
               </SelectContent>
             </Select>
+            {isFaceSwap && (
+              <p className="text-xs text-muted-foreground">
+                Replaces every detected face with the bundled source identity using
+                the BlendSwap model.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -369,28 +435,46 @@ export function UploadVideoPanel() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
-            <Label htmlFor="show-bounding-box" className="text-sm">
-              Show Bounding Box
-            </Label>
-            <Switch
-              id="show-bounding-box"
-              checked={showBoundingBox}
-              onCheckedChange={(checked) => {
-                setShowBoundingBox(checked)
-                setFormError(null)
-              }}
-            />
-          </div>
+          {isFaceSwap ? (
+            <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
+              <Label htmlFor="stabilize" className="text-sm">
+                Temporal Stabilization
+              </Label>
+              <Switch
+                id="stabilize"
+                checked={stabilize}
+                onCheckedChange={(checked) => {
+                  setStabilize(checked)
+                  setFormError(null)
+                }}
+              />
+            </div>
+          ) : (
+            <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
+              <Label htmlFor="show-bounding-box" className="text-sm">
+                Show Bounding Box
+              </Label>
+              <Switch
+                id="show-bounding-box"
+                checked={showBoundingBox}
+                onCheckedChange={(checked) => {
+                  setShowBoundingBox(checked)
+                  setFormError(null)
+                }}
+              />
+            </div>
+          )}
 
           <div className="rounded-lg border border-cyan-300/20 bg-linear-to-r from-cyan-500/14 via-cyan-400/8 to-transparent px-4 py-3">
             <p className="text-sm font-semibold text-foreground">Current Settings</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Filter {filterOptions.find((option) => option.value === filter)?.label} | FPS
+              Filter {getFilterLabel(filter)} | FPS {targetFpsInput.trim() || '--'} |
               {' '}
-              {targetFpsInput.trim() || '--'} | Range {startSecInput.trim() || 'auto'}s to
+              Range {startSecInput.trim() || 'auto'}s to {endSecInput.trim() || 'auto'}s |
               {' '}
-              {endSecInput.trim() || 'auto'}s
+              {isFaceSwap
+                ? `Stabilization ${stabilize ? 'On' : 'Off'}`
+                : `Bounding Box ${showBoundingBox ? 'On' : 'Off'}`}
             </p>
           </div>
 
@@ -408,7 +492,7 @@ export function UploadVideoPanel() {
             {isProcessing ? (
               <>
                 <Loader2 className="size-4 animate-spin" />
-                Processing...
+                {processingStatus === 'uploading' ? 'Uploading...' : 'Processing...'}
               </>
             ) : (
               <>
@@ -423,13 +507,19 @@ export function UploadVideoPanel() {
               <div className="mb-2 flex items-center justify-between gap-2">
                 <p className="text-sm font-semibold text-foreground">Processing Status</p>
                 <Badge className="bg-cyan-500/20 text-cyan-700 dark:text-cyan-100">
-                  {isProcessing ? 'Running' : 'Completed'}
+                  {isProcessing
+                    ? processingStatus === 'uploading'
+                      ? 'Uploading'
+                      : 'Running'
+                    : 'Completed'}
                 </Badge>
               </div>
               <Progress value={processingProgress} className="h-2.5" />
               <p className="mt-2 text-xs text-muted-foreground">
                 {isProcessing
-                  ? 'Guard is processing this video with selected settings.'
+                  ? processingStatus === 'uploading'
+                    ? 'Uploading the source video to the processing backend.'
+                    : 'Guard is processing this video with selected settings.'
                   : 'Guard completed. Review the protected output on the right panel.'}
               </p>
             </section>
@@ -452,7 +542,9 @@ export function UploadVideoPanel() {
                   <>
                     <Loader2 className="size-10 animate-spin text-cyan-300/90" />
                     <p className="text-sm text-cyan-100/90">
-                      Processing secure output... {processingProgress}%
+                      {processingStatus === 'uploading'
+                        ? 'Uploading source video...'
+                        : `Processing secure output... ${processingProgress}%`}
                     </p>
                   </>
                 ) : (
@@ -467,34 +559,13 @@ export function UploadVideoPanel() {
             )}
 
             {resultVideoUrl && (
-              <>
-                <video
-                  key={`${resultVideoUrl}-${filter}`}
-                  src={resultVideoUrl}
-                  controls
-                  playsInline
-                  className="h-full w-full object-contain"
-                  style={{ filter: resultFilterMap[filter] }}
-                />
-
-                {filter === 'pixelate' && (
-                  <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(transparent_94%,rgba(8,145,178,0.5)_95%),linear-gradient(90deg,transparent_94%,rgba(8,145,178,0.5)_95%)] bg-size-[14px_14px] opacity-30" />
-                )}
-
-                {showBoundingBox && (
-                  <>
-                    <div className="pointer-events-none absolute top-[19%] left-[21%] h-24 w-20 rounded-md border-2 border-cyan-300/90 shadow-[0_0_18px_-6px_rgba(34,211,238,0.95)]" />
-                    <div className="pointer-events-none absolute top-[36%] right-[23%] h-28 w-24 rounded-md border-2 border-cyan-300/90 shadow-[0_0_18px_-6px_rgba(34,211,238,0.95)]" />
-                  </>
-                )}
-
-                {filter === 'mask' && (
-                  <>
-                    <div className="pointer-events-none absolute top-[19%] left-[21%] h-24 w-20 rounded-full bg-slate-950/80" />
-                    <div className="pointer-events-none absolute top-[36%] right-[23%] h-28 w-24 rounded-full bg-slate-950/80" />
-                  </>
-                )}
-              </>
+              <video
+                key={resultVideoUrl}
+                src={resultVideoUrl}
+                controls
+                playsInline
+                className="h-full w-full object-contain"
+              />
             )}
           </div>
 
@@ -504,25 +575,33 @@ export function UploadVideoPanel() {
               <p className="text-sm font-semibold text-foreground">Output Summary</p>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Mode: {filterOptions.find((option) => option.value === filter)?.label} | Target
-              {' '}
-              {lastRequest?.target_fps ?? '--'} FPS | Range {lastRequest?.start_sec ?? 'auto'}s
-              {' '}
-              to {lastRequest?.end_sec ?? 'auto'}s | Bounding Box
-              {' '}
-              {lastRequest?.draw_tracks ? 'On' : 'Off'}
+              {lastRun ? (
+                <>
+                  Mode: {getFilterLabel(lastRun.filter)} | Target {lastRun.targetFps} FPS |
+                  {' '}
+                  Range {lastRun.startSec ?? 'auto'}s to {lastRun.endSec ?? 'auto'}s |
+                  {' '}
+                  {lastRun.filter === 'swap'
+                    ? `Stabilization ${lastRun.stabilize ? 'On' : 'Off'}`
+                    : `Bounding Box ${lastRun.drawTracks ? 'On' : 'Off'}`}
+                  {' '}
+                  | {lastRun.elapsedSec.toFixed(1)}s
+                </>
+              ) : (
+                'Run Activate Guard to generate a protected output.'
+              )}
             </p>
           </div>
 
-          {selectedFile && resultVideoUrl && (
+          {resultVideoUrl && (
             <Button
               asChild
               variant="outline"
               className="w-full border-cyan-300/35 bg-cyan-500/5 hover:bg-cyan-500/15"
             >
-              <a href={resultVideoUrl} download={`guarded-preview-${selectedFile.name}`}>
+              <a href={resultVideoUrl} download>
                 <FileVideo className="size-4" />
-                Download Preview
+                Download Result
               </a>
             </Button>
           )}
