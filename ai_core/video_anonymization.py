@@ -13,6 +13,7 @@ from ai_core.face_anonymization.face_anonymizer import (
     AnonymizationMethod,
     FaceAnonymizer,
 )
+from ai_core.face_anonymization.face_swap_offline import OfflineFaceSwapStabilizer
 from ai_core.face_anonymization.face_swap_stabilizer import FaceSwapStabilizer
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
@@ -149,6 +150,7 @@ class VideoAnonymization:
         draw_tracks: bool = False,
         codec: str = "H264",
         progress_every: int = 60,
+        keep_audio: bool = True,
     ) -> VideoAnonymizationResult:
         input_path = Path(input_path)
         output_path = self._resolve_output_path(
@@ -201,6 +203,8 @@ class VideoAnonymization:
             output_path=str(output_path),
             fps=output_fps,
             codec=codec,
+            audio_source=str(input_path) if keep_audio else None,
+            audio_start_sec=float(start_sec) if start_sec else 0.0,
         )
         elapsed = time.perf_counter() - t0
         throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0
@@ -267,6 +271,25 @@ class VideoAnonymization:
 
             yield output_frame
 
+    def _iter_offline_rendered_frames(
+        self,
+        frames: Iterator[np.ndarray],
+        offline: OfflineFaceSwapStabilizer,
+        progress_every: int,
+    ) -> Iterator[np.ndarray]:
+        # Pass 2: re-iterate the same frames and swap using the smoothed plan.
+        for frame_idx, frame_bgr in enumerate(frames):
+            t0 = time.perf_counter()
+            output_frame = offline.render(frame_idx, frame_bgr)
+            frame_ms = (time.perf_counter() - t0) * 1000.0
+            if progress_every > 0 and (frame_idx + 1) % progress_every == 0:
+                print(
+                    f"  pass 2: {frame_idx + 1} frames "
+                    f"| frame: {frame_ms:6.1f} ms "
+                    f"| faces: {offline.last_face_count}"
+                )
+            yield output_frame
+
     def anonymize_video_with_model(
         self,
         input_path: str | Path,
@@ -278,10 +301,12 @@ class VideoAnonymization:
         codec: str = "H264",
         progress_every: int = 60,
         stabilize: bool = True,
+        smoothing: str = "online",
         smooth_min_cutoff: float = 0.5,
         smooth_beta: float = 0.05,
         output_smooth: float = 0.4,
         mask_smooth: float = 0.5,
+        keep_audio: bool = True,
     ) -> VideoAnonymizationResult:
         if self.face_anonymizer.face_swapper is None:
             raise RuntimeError(
@@ -298,6 +323,12 @@ class VideoAnonymization:
         if not input_path.exists():
             raise FileNotFoundError(f"Input video not found: {input_path}")
 
+        smoothing = smoothing.strip().lower()
+        if smoothing not in ("online", "offline"):
+            raise ValueError(
+                f"smoothing must be 'online' or 'offline', got {smoothing!r}"
+            )
+
         aligner = self._resolve_face_aligner()
         source_meta = self.video_io.get_video_metadata(str(input_path))
         output_fps = self._resolve_output_fps(source_meta.fps, target_fps)
@@ -311,35 +342,65 @@ class VideoAnonymization:
         print(f"Output: {output_path}")
         print("Anonymization method: swap (BlendSwap)")
         print(f"Output FPS: {output_fps:.3f}")
-        print(f"Temporal stabilization: {'on' if stabilize else 'off'}")
+        stabilize_mode = (smoothing if stabilize else "off")
+        print(f"Temporal stabilization: {stabilize_mode}")
+        print(f"Keep audio: {'on' if keep_audio else 'off'}")
 
         # Prepare the source identity once up-front so any source issues surface early.
         self.face_anonymizer.face_swapper.prepare_source()
 
-        stabilizer: FaceSwapStabilizer | None = None
-        if stabilize:
-            stabilizer = FaceSwapStabilizer(
-                detector=self.face_detector,
-                swapper=self.face_anonymizer.face_swapper,
-                freq=output_fps,
-                min_cutoff=smooth_min_cutoff,
-                beta=smooth_beta,
-                output_smooth=output_smooth,
-                mask_smooth=mask_smooth,
+        def _make_source_frames() -> Iterator[np.ndarray]:
+            return self.video_io.iter_frames(
+                str(input_path),
+                start_sec=start_sec,
+                end_sec=end_sec,
+                target_fps=target_fps,
             )
 
-        source_frames = self.video_io.iter_frames(
-            str(input_path),
-            start_sec=start_sec,
-            end_sec=end_sec,
-            target_fps=target_fps,
-        )
-        processed_frames = self._iter_swapped_frames(
-            frames=source_frames,
-            aligner=aligner,
-            progress_every=progress_every,
-            stabilizer=stabilizer,
-        )
+        if stabilize and smoothing == "offline":
+            offline = OfflineFaceSwapStabilizer(
+                detector=self.face_detector,
+                swapper=self.face_anonymizer.face_swapper,
+                # Zero-phase landmark smoothing replaces the causal crop EMA; keep the
+                # mask EMA since the parser edge can still jitter frame-to-frame.
+                output_smooth=0.0,
+                mask_smooth=mask_smooth,
+            )
+            print("Pass 1/2: detecting + tracking faces across the clip...")
+            pass1_count = 0
+            for frame_bgr in _make_source_frames():
+                offline.observe(frame_bgr)
+                pass1_count += 1
+                if progress_every > 0 and pass1_count % progress_every == 0:
+                    print(
+                        f"  pass 1: {pass1_count} frames "
+                        f"| faces: {offline.last_face_count}"
+                    )
+            offline.finalize()
+            print(f"Pass 1 done ({pass1_count} frames). Pass 2/2: swapping...")
+            processed_frames = self._iter_offline_rendered_frames(
+                _make_source_frames(),
+                offline,
+                progress_every,
+            )
+        else:
+            stabilizer: FaceSwapStabilizer | None = None
+            if stabilize:
+                stabilizer = FaceSwapStabilizer(
+                    detector=self.face_detector,
+                    swapper=self.face_anonymizer.face_swapper,
+                    freq=output_fps,
+                    min_cutoff=smooth_min_cutoff,
+                    beta=smooth_beta,
+                    output_smooth=output_smooth,
+                    mask_smooth=mask_smooth,
+                )
+            processed_frames = self._iter_swapped_frames(
+                frames=_make_source_frames(),
+                aligner=aligner,
+                progress_every=progress_every,
+                stabilizer=stabilizer,
+            )
 
         t0 = time.perf_counter()
         output_meta = self.video_io.write_frames(
@@ -347,6 +408,8 @@ class VideoAnonymization:
             output_path=str(output_path),
             fps=output_fps,
             codec=codec,
+            audio_source=str(input_path) if keep_audio else None,
+            audio_start_sec=float(start_sec) if start_sec else 0.0,
         )
         elapsed = time.perf_counter() - t0
         throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0

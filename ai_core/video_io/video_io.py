@@ -1,4 +1,7 @@
 import cv2
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -212,6 +215,32 @@ class VideoIO:
 
         return writer
 
+    def _open_writer_with_fallback(
+        self,
+        output_path: str,
+        fps: float,
+        width: int,
+        height: int,
+        codec: str,
+    ) -> cv2.VideoWriter:
+        """Open a cv2 writer with ``codec``, falling back to 'mp4v' if it can't open.
+
+        Some OpenCV builds ship without an H.264 encoder, so 'H264'/'avc1' fail to
+        open a writer. Rather than abort the whole render, retry with the universally
+        available 'mp4v' and warn. (The ffmpeg path is preferred and produces real
+        H.264; this fallback only runs when ffmpeg is missing.)
+        """
+        try:
+            return self._create_video_writer(output_path, fps, width, height, codec)
+        except ValueError:
+            if codec.lower() == "mp4v":
+                raise
+            print(
+                f"Warning: OpenCV cannot open a '{codec}' writer in this build; "
+                "falling back to 'mp4v'."
+            )
+            return self._create_video_writer(output_path, fps, width, height, "mp4v")
+
     def iter_frames(
         self,
         video_path: str,
@@ -272,21 +301,173 @@ class VideoIO:
         """
         return list(self.iter_frames(video_path, start_sec, end_sec, target_fps))
 
+    @staticmethod
+    def _ffmpeg_available() -> bool:
+        return shutil.which("ffmpeg") is not None
+
+    @staticmethod
+    def _source_has_audio(source_path: str) -> bool:
+        """True if ``source_path`` has at least one audio stream (via ffprobe)."""
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            return False
+        try:
+            proc = subprocess.run(
+                [
+                    ffprobe,
+                    "-v", "error",
+                    "-select_streams", "a",
+                    "-show_entries", "stream=index",
+                    "-of", "csv=p=0",
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return False
+        return bool(proc.stdout.strip())
+
+    def _write_frames_ffmpeg(
+        self,
+        frames: Iterable[np.ndarray],
+        output_path: str,
+        fps: float,
+        *,
+        audio_source: str | None,
+        audio_start_sec: float,
+        crf: int,
+        preset: str,
+    ) -> VideoMetadata:
+        """Encode frames via an ffmpeg pipe, muxing audio from ``audio_source``.
+
+        Frames are streamed as raw BGR24 into ffmpeg's stdin and encoded with
+        libx264 (yuv420p for broad playback). When ``audio_source`` carries an audio
+        stream it is mapped in (seeked to ``audio_start_sec`` to honour a trimmed
+        range) and ``-shortest`` keeps it aligned to the rendered video length.
+        """
+        frame_iter = iter(frames)
+        try:
+            first_frame = next(frame_iter)
+        except StopIteration as exc:
+            raise ValueError("frames is empty; cannot build output video") from exc
+
+        first_frame = self._normalize_frame_for_write(first_frame, frame_index=0)
+        height, width = first_frame.shape[:2]
+
+        has_audio = audio_source is not None and self._source_has_audio(audio_source)
+
+        ffmpeg = shutil.which("ffmpeg")
+        cmd: list[str] = [
+            str(ffmpeg),
+            "-y",
+            "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{width}x{height}",
+            "-r", f"{fps}",
+            "-i", "-",
+        ]
+        if has_audio:
+            if audio_start_sec and audio_start_sec > 0:
+                cmd += ["-ss", f"{audio_start_sec}"]
+            cmd += ["-i", str(audio_source)]
+
+        cmd += ["-map", "0:v:0"]
+        if has_audio:
+            # '?' makes the audio mapping optional so a stream-less file never aborts.
+            cmd += ["-map", "1:a:0?", "-c:a", "aac", "-b:a", "192k"]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", preset,
+            "-crf", str(int(crf)),
+            "-pix_fmt", "yuv420p",
+        ]
+        if has_audio:
+            cmd += ["-shortest"]
+        cmd += [str(output_path)]
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+        # stderr -> temp file (not a pipe) so a chatty ffmpeg can never deadlock the
+        # writer by filling an unread pipe buffer mid-stream.
+        stderr_buf = tempfile.TemporaryFile()
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr_buf)
+        assert proc.stdin is not None
+
+        frame_count = 0
+        try:
+            proc.stdin.write(first_frame.tobytes())
+            frame_count += 1
+            for frame_index, frame in enumerate(frame_iter, start=1):
+                normalized = self._normalize_frame_for_write(
+                    frame,
+                    frame_index=frame_index,
+                    expected_size=(height, width),
+                )
+                proc.stdin.write(normalized.tobytes())
+                frame_count += 1
+        except BrokenPipeError:
+            # ffmpeg exited early; the return code + stderr below explain why.
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            returncode = proc.wait()
+            stderr_buf.seek(0)
+            stderr = stderr_buf.read().decode("utf-8", errors="replace").strip()
+            stderr_buf.close()
+
+        if returncode != 0:
+            raise ValueError(
+                f"ffmpeg failed (exit code {returncode}) writing {output_path}: "
+                f"{stderr or '<no stderr>'}"
+            )
+
+        return VideoMetadata(
+            fps=fps,
+            frame_count=frame_count,
+            duration_sec=frame_count / fps if fps > 0 else 0.0,
+            width=width,
+            height=height,
+        )
+
     def write_frames(
         self,
         frames: Iterable[np.ndarray],
         output_path: str,
         fps: float,
-        codec: str = "mp4v",
+        codec: str = "H264",
+        *,
+        audio_source: str | None = None,
+        audio_start_sec: float = 0.0,
+        crf: int = 18,
+        preset: str = "medium",
     ) -> VideoMetadata:
         """
         Write frames to a video file.
+
+        Encoding prefers ffmpeg (libx264 -> H.264, yuv420p) whenever ffmpeg is on the
+        PATH, so the output is real H.264 regardless of audio. ``audio_source`` is
+        muxed in on that path. Only when ffmpeg is unavailable does it fall back to the
+        OpenCV writer, which is silent and uses the ``codec`` FourCC (auto-falling back
+        to 'mp4v' if the requested codec cannot be opened — e.g. OpenCV builds without
+        libx264 cannot write H.264).
 
         Args:
             frames: Iterable of frames as numpy arrays (preferably BGR).
             output_path: Path of the output video file.
             fps: Output video FPS.
-            codec: FourCC codec (default: 'mp4v').
+            codec: FourCC codec for the OpenCV fallback path only (default: 'H264',
+                falls back to 'mp4v' when the build cannot open it).
+            audio_source: When set (and ffmpeg is available), this file's audio is
+                muxed into the output.
+            audio_start_sec: Seek offset applied to the muxed audio so it stays in
+                sync with a trimmed (``start_sec``) render.
+            crf / preset: libx264 quality knobs for the ffmpeg path.
 
         Returns:
             Metadata of the created output video.
@@ -297,6 +478,23 @@ class VideoIO:
         """
         fps = self._validate_output_fps(fps)
 
+        if self._ffmpeg_available():
+            return self._write_frames_ffmpeg(
+                frames,
+                output_path,
+                fps,
+                audio_source=audio_source,
+                audio_start_sec=audio_start_sec,
+                crf=crf,
+                preset=preset,
+            )
+
+        if audio_source is not None:
+            print(
+                "Warning: ffmpeg not found on PATH; writing video without audio "
+                "via the OpenCV writer."
+            )
+
         frame_iter = iter(frames)
         try:
             first_frame = next(frame_iter)
@@ -306,7 +504,9 @@ class VideoIO:
         first_frame = self._normalize_frame_for_write(first_frame, frame_index=0)
         height, width = first_frame.shape[:2]
 
-        writer = self._create_video_writer(output_path, fps, width, height, codec)
+        writer = self._open_writer_with_fallback(
+            output_path, fps, width, height, codec
+        )
         frame_count = 0
         try:
             writer.write(first_frame)

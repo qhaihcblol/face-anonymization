@@ -128,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--codec",
         type=str,
-        default="mp4v",
+        default="H264",
         help="Output video FourCC codec (4 chars)",
     )
     parser.add_argument(

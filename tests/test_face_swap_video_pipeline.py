@@ -87,7 +87,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-sec", type=float, default=None)
     parser.add_argument("--end-sec", type=float, default=None)
     parser.add_argument(
-        "--codec", type=str, default="mp4v", help="Output video FourCC codec (4 chars)"
+        "--codec", type=str, default="H264", help="Output video FourCC codec (4 chars)"
     )
     parser.add_argument(
         "--progress-every", type=int, default=60, help="Print progress every N frames"
@@ -120,6 +120,20 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="EMA weight on the blend mask (0 = off, higher = steadier edges)",
+    )
+    parser.add_argument(
+        "--smoothing",
+        choices=("online", "offline"),
+        default="online",
+        help=(
+            "Landmark smoothing mode. 'online' = causal 1-Euro (default); "
+            "'offline' = 2-pass zero-phase (no lag, recommended for uploads)"
+        ),
+    )
+    parser.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Do not mux the source audio into the output (silent video)",
     )
     return parser
 
@@ -166,10 +180,12 @@ def main() -> None:
         codec=args.codec,
         progress_every=args.progress_every,
         stabilize=not args.no_stabilize,
+        smoothing=args.smoothing,
         smooth_min_cutoff=args.smooth_min_cutoff,
         smooth_beta=args.smooth_beta,
         output_smooth=args.output_smooth,
         mask_smooth=args.mask_smooth,
+        keep_audio=not args.no_audio,
     )
     print(f"Saved output to: {result.output_path}")
 
