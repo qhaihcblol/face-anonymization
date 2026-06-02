@@ -112,8 +112,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-smooth",
         type=float,
-        default=0.4,
-        help="EMA weight on the swapped crop (0 = off, higher = less flicker)",
+        default=None,
+        help=(
+            "EMA weight on the swapped crop (0 = off, higher = less flicker). "
+            "Unset = per-mode default: 0.4 for online, 0.25 for offline."
+        ),
     )
     parser.add_argument(
         "--mask-smooth",

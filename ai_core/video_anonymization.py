@@ -304,7 +304,7 @@ class VideoAnonymization:
         smoothing: str = "online",
         smooth_min_cutoff: float = 0.5,
         smooth_beta: float = 0.05,
-        output_smooth: float = 0.4,
+        output_smooth: float | None = None,
         mask_smooth: float = 0.5,
         keep_audio: bool = True,
     ) -> VideoAnonymizationResult:
@@ -328,6 +328,15 @@ class VideoAnonymization:
             raise ValueError(
                 f"smoothing must be 'online' or 'offline', got {smoothing!r}"
             )
+
+        # Crop-EMA strength depends on the smoothing mode, so default it per mode when
+        # the caller leaves it unset. Online's causal 1-Euro leaves residual landmark
+        # jitter, so it leans on a stronger EMA (0.4) to damp the per-frame
+        # restore/color flicker. Offline's zero-phase landmarks are already steady, so it
+        # only needs a light EMA (0.25); a heavier one would reintroduce causal
+        # lip-ghosting in pass 2.
+        if output_smooth is None:
+            output_smooth = 0.25 if smoothing == "offline" else 0.4
 
         aligner = self._resolve_face_aligner()
         source_meta = self.video_io.get_video_metadata(str(input_path))
@@ -361,9 +370,12 @@ class VideoAnonymization:
             offline = OfflineFaceSwapStabilizer(
                 detector=self.face_detector,
                 swapper=self.face_anonymizer.face_swapper,
-                # Zero-phase landmark smoothing replaces the causal crop EMA; keep the
-                # mask EMA since the parser edge can still jitter frame-to-frame.
-                output_smooth=0.0,
+                # Zero-phase landmark smoothing already steadies the geometry, so the
+                # crop EMA only needs to be light (see per-mode default above): just
+                # enough to damp per-frame restore/color flicker without the causal
+                # lip-ghosting a heavy EMA would add in pass 2. The mask EMA stays on
+                # since the parser edge can still jitter frame-to-frame.
+                output_smooth=output_smooth,
                 mask_smooth=mask_smooth,
             )
             print("Pass 1/2: detecting + tracking faces across the clip...")
