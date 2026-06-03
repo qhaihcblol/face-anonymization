@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 import time
 from typing import Iterator
 
@@ -18,6 +20,10 @@ from ai_core.face_anonymization.face_swap_stabilizer import FaceSwapStabilizer
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
 from ai_core.video_io.video_io import VideoIO, VideoMetadata
+from ai_core.voice_anonymization.voice_anonymizer import (
+    VoiceAnonymizationMethod,
+    VoiceAnonymizer,
+)
 
 
 @dataclass(slots=True)
@@ -36,6 +42,7 @@ class VideoAnonymization:
         face_tracker: ByteTracker,
         face_anonymizer: FaceAnonymizer,
         face_aligner: FaceAligner | None = None,
+        voice_anonymizer: VoiceAnonymizer | None = None,
     ) -> None:
         self.video_io = video_io
         self.face_detector = face_detector
@@ -43,6 +50,8 @@ class VideoAnonymization:
         self.face_anonymizer = face_anonymizer
         # Aligner is only needed for the model-based (face swap) path.
         self.face_aligner = face_aligner
+        # Voice anonymizer is optional; only needed when anonymize_voice=True.
+        self.voice_anonymizer = voice_anonymizer
 
     def _resolve_face_aligner(self) -> FaceAligner:
         # BlendSwap expects the FFHQ template at 256x256; FaceSwapper re-derives the
@@ -79,6 +88,66 @@ class VideoAnonymization:
             iou_thresh_low=tracker.iou_thresh_low,
             gate_mahal=tracker.gate_mahal,
         )
+
+    @staticmethod
+    def _voice_label(voice_method: VoiceAnonymizationMethod | str) -> str:
+        if isinstance(voice_method, VoiceAnonymizationMethod):
+            return voice_method.value
+        return str(voice_method)
+
+    def _resolve_audio_source(
+        self,
+        input_path: Path,
+        stack: contextlib.ExitStack,
+        *,
+        keep_audio: bool,
+        anonymize_voice: bool,
+        voice_method: VoiceAnonymizationMethod | str,
+        start_sec: float | None,
+        end_sec: float | None,
+    ) -> tuple[str | None, float]:
+        """Resolve the ``(audio_source, audio_start_sec)`` passed to ``write_frames``.
+
+        - ``keep_audio=False`` -> ``(None, 0.0)``: silent output.
+        - voice anonymization off -> ``(input_path, start)``: mux the original audio.
+        - voice anonymization on -> extract the ``[start, end]`` window, run the
+          :class:`VoiceAnonymizer`, write a temp WAV (cleaned up via ``stack``) and
+          return ``(wav, 0.0)`` since the extracted window is already trimmed.
+
+        Falls back to silent output if voice anonymization is requested but the input
+        carries no audio stream.
+        """
+        if not keep_audio:
+            return None, 0.0
+
+        start = float(start_sec) if start_sec else 0.0
+        if not anonymize_voice:
+            return str(input_path), start
+
+        if self.voice_anonymizer is None:
+            raise RuntimeError(
+                "anonymize_voice=True requires "
+                "VideoAnonymization(..., voice_anonymizer=VoiceAnonymizer(...))."
+            )
+
+        if not self.video_io.has_audio(str(input_path)):
+            print(
+                "Warning: voice anonymization requested but the input has no audio "
+                "stream; the output will be silent."
+            )
+            return None, 0.0
+
+        waveform, sample_rate = self.video_io.extract_audio(
+            str(input_path), start_sec=start_sec, end_sec=end_sec
+        )
+        processed = self.voice_anonymizer.process(
+            waveform, sample_rate, method=voice_method
+        )
+        work_dir = stack.enter_context(tempfile.TemporaryDirectory())
+        wav_path = Path(work_dir) / "voice_anonymized.wav"
+        self.video_io.write_audio(processed, sample_rate, str(wav_path))
+        # The extracted window is already trimmed, so no further audio seek is needed.
+        return str(wav_path), 0.0
 
     def _iter_processed_frames(
         self,
@@ -151,6 +220,10 @@ class VideoAnonymization:
         codec: str = "H264",
         progress_every: int = 60,
         keep_audio: bool = True,
+        anonymize_voice: bool = False,
+        voice_method: VoiceAnonymizationMethod | str = (
+            VoiceAnonymizationMethod.MCADAMS
+        ),
     ) -> VideoAnonymizationResult:
         input_path = Path(input_path)
         output_path = self._resolve_output_path(
@@ -180,6 +253,9 @@ class VideoAnonymization:
         print(f"Anonymization method: {method_value.value}")
         print(f"Detect interval: {detect_interval}")
         print(f"Output FPS: {output_fps:.3f}")
+        print(f"Keep audio: {'on' if keep_audio else 'off'}")
+        if anonymize_voice and keep_audio:
+            print(f"Voice anonymization: on ({self._voice_label(voice_method)})")
 
         source_frames = self.video_io.iter_frames(
             str(input_path),
@@ -197,16 +273,26 @@ class VideoAnonymization:
             progress_every=progress_every,
         )
 
-        t0 = time.perf_counter()
-        output_meta = self.video_io.write_frames(
-            frames=processed_frames,
-            output_path=str(output_path),
-            fps=output_fps,
-            codec=codec,
-            audio_source=str(input_path) if keep_audio else None,
-            audio_start_sec=float(start_sec) if start_sec else 0.0,
-        )
-        elapsed = time.perf_counter() - t0
+        with contextlib.ExitStack() as stack:
+            audio_source, audio_start = self._resolve_audio_source(
+                input_path,
+                stack,
+                keep_audio=keep_audio,
+                anonymize_voice=anonymize_voice,
+                voice_method=voice_method,
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
+            t0 = time.perf_counter()
+            output_meta = self.video_io.write_frames(
+                frames=processed_frames,
+                output_path=str(output_path),
+                fps=output_fps,
+                codec=codec,
+                audio_source=audio_source,
+                audio_start_sec=audio_start,
+            )
+            elapsed = time.perf_counter() - t0
         throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0
 
         print("Done.")
@@ -307,6 +393,10 @@ class VideoAnonymization:
         output_smooth: float | None = None,
         mask_smooth: float = 0.5,
         keep_audio: bool = True,
+        anonymize_voice: bool = False,
+        voice_method: VoiceAnonymizationMethod | str = (
+            VoiceAnonymizationMethod.MCADAMS
+        ),
     ) -> VideoAnonymizationResult:
         if self.face_anonymizer.face_swapper is None:
             raise RuntimeError(
@@ -354,6 +444,8 @@ class VideoAnonymization:
         stabilize_mode = (smoothing if stabilize else "off")
         print(f"Temporal stabilization: {stabilize_mode}")
         print(f"Keep audio: {'on' if keep_audio else 'off'}")
+        if anonymize_voice and keep_audio:
+            print(f"Voice anonymization: on ({self._voice_label(voice_method)})")
 
         # Prepare the source identity once up-front so any source issues surface early.
         self.face_anonymizer.face_swapper.prepare_source()
@@ -414,16 +506,26 @@ class VideoAnonymization:
                 stabilizer=stabilizer,
             )
 
-        t0 = time.perf_counter()
-        output_meta = self.video_io.write_frames(
-            frames=processed_frames,
-            output_path=str(output_path),
-            fps=output_fps,
-            codec=codec,
-            audio_source=str(input_path) if keep_audio else None,
-            audio_start_sec=float(start_sec) if start_sec else 0.0,
-        )
-        elapsed = time.perf_counter() - t0
+        with contextlib.ExitStack() as stack:
+            audio_source, audio_start = self._resolve_audio_source(
+                input_path,
+                stack,
+                keep_audio=keep_audio,
+                anonymize_voice=anonymize_voice,
+                voice_method=voice_method,
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
+            t0 = time.perf_counter()
+            output_meta = self.video_io.write_frames(
+                frames=processed_frames,
+                output_path=str(output_path),
+                fps=output_fps,
+                codec=codec,
+                audio_source=audio_source,
+                audio_start_sec=audio_start,
+            )
+            elapsed = time.perf_counter() - t0
         throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0
 
         print("Done.")
