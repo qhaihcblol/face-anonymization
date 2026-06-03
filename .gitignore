@@ -7,8 +7,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-test_videos/*
-!test_videos/.gitkeep
+# test_videos/*
+# !test_videos/.gitkeep
 
 outputs/*
 !outputs/.gitkeep
@@ -17,4 +17,4 @@ webapp/backend/venv/
 webapp/backend/.env
 
 test_images/*
-*.mp4
+# *.mp4
