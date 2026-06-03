@@ -1,4 +1,5 @@
 import cv2
+import json
 import shutil
 import subprocess
 import tempfile
@@ -301,6 +302,151 @@ class VideoIO:
         """
         return list(self.iter_frames(video_path, start_sec, end_sec, target_fps))
 
+    def has_audio(self, video_path: str) -> bool:
+        """True if the file has at least one decodable audio stream."""
+        return self._probe_audio_params(str(video_path)) is not None
+
+    def extract_audio(
+        self,
+        video_path: str,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+    ) -> tuple[np.ndarray, int]:
+        """Decode the first audio stream into a float32 waveform.
+
+        Mirrors ``iter_frames`` for audio: the optional ``[start_sec, end_sec]``
+        window is honoured so the extracted track stays aligned with a trimmed
+        render. The source sample rate and channel layout are preserved.
+
+        Args:
+            video_path: Path to the media file.
+            start_sec:  Start time in seconds. Defaults to 0.0.
+            end_sec:    End time in seconds. Defaults to end of stream.
+
+        Returns:
+            ``(waveform, sample_rate)`` where ``waveform`` has shape
+            ``(n_samples, channels)`` as float32 in roughly [-1, 1] (always 2-D,
+            even for mono).
+
+        Raises:
+            ValueError: If ffmpeg is unavailable, the file has no audio stream,
+                the time range is invalid, or decoding fails.
+        """
+        if not self._ffmpeg_available():
+            raise ValueError(
+                "ffmpeg is required to extract audio but was not found on PATH."
+            )
+
+        params = self._probe_audio_params(str(video_path))
+        if params is None:
+            raise ValueError(f"No audio stream found in: {video_path}")
+        sample_rate, channels = params
+
+        start = float(start_sec) if start_sec else 0.0
+        if start < 0:
+            raise ValueError(f"start_sec must be >= 0, got {start_sec}")
+
+        ffmpeg = shutil.which("ffmpeg")
+        # -ss before -i = fast, accurate-enough input seek for audio.
+        cmd: list[str] = [str(ffmpeg), "-v", "error"]
+        if start > 0:
+            cmd += ["-ss", f"{start}"]
+        if end_sec is not None:
+            duration = float(end_sec) - start
+            if duration <= 0:
+                raise ValueError(
+                    f"Invalid time range: start={start}, end={end_sec}"
+                )
+            cmd += ["-t", f"{duration}"]
+        cmd += [
+            "-i", str(video_path),
+            "-map", "0:a:0",
+            "-f", "f32le",
+            "-acodec", "pcm_f32le",
+            "-",
+        ]
+
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise ValueError(
+                f"ffmpeg failed extracting audio from {video_path}: "
+                f"{stderr or '<no stderr>'}"
+            )
+
+        # frombuffer gives a read-only view over ffmpeg's bytes; copy so callers
+        # (voice anonymizer) can transform the waveform in place.
+        waveform = np.frombuffer(proc.stdout, dtype=np.float32).copy()
+        return waveform.reshape(-1, channels), sample_rate
+
+    def write_audio(
+        self,
+        waveform: np.ndarray,
+        sample_rate: int,
+        output_path: str,
+    ) -> str:
+        """Write a float32 waveform to a WAV file via ffmpeg.
+
+        Used to hand a processed audio track back as the ``audio_source`` for
+        ``write_frames``. Samples outside [-1, 1] are clipped by ffmpeg during the
+        f32 -> pcm_s16le conversion.
+
+        Args:
+            waveform: float32 array of shape ``(n_samples,)`` or
+                ``(n_samples, channels)``.
+            sample_rate: Output sample rate (Hz).
+            output_path: Destination WAV path.
+
+        Returns:
+            ``output_path`` as a string.
+
+        Raises:
+            ValueError: If ffmpeg is unavailable, the waveform shape or sample
+                rate is invalid, or encoding fails.
+        """
+        if not self._ffmpeg_available():
+            raise ValueError(
+                "ffmpeg is required to write audio but was not found on PATH."
+            )
+        if not isinstance(sample_rate, (int, float)) or sample_rate <= 0:
+            raise ValueError(f"sample_rate must be > 0, got {sample_rate}")
+
+        audio = np.ascontiguousarray(np.asarray(waveform, dtype=np.float32))
+        if audio.ndim == 1:
+            channels = 1
+        elif audio.ndim == 2 and audio.shape[1] >= 1:
+            channels = int(audio.shape[1])
+        else:
+            raise ValueError(
+                f"waveform must be 1-D or 2-D (n_samples, channels >= 1), "
+                f"got shape {audio.shape}"
+            )
+
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        ffmpeg = shutil.which("ffmpeg")
+        cmd = [
+            str(ffmpeg),
+            "-y",
+            "-v", "error",
+            "-f", "f32le",
+            "-ar", str(int(sample_rate)),
+            "-ac", str(channels),
+            "-i", "-",
+            "-c:a", "pcm_s16le",
+            str(out),
+        ]
+
+        proc = subprocess.run(cmd, input=audio.tobytes(), capture_output=True)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise ValueError(
+                f"ffmpeg failed writing audio to {output_path}: "
+                f"{stderr or '<no stderr>'}"
+            )
+        return str(out)
+
     @staticmethod
     def _ffmpeg_available() -> bool:
         return shutil.which("ffmpeg") is not None
@@ -328,6 +474,51 @@ class VideoIO:
         except (subprocess.SubprocessError, OSError):
             return False
         return bool(proc.stdout.strip())
+
+    @staticmethod
+    def _probe_audio_params(source_path: str) -> tuple[int, int] | None:
+        """Return (sample_rate, channels) of the first audio stream, or None.
+
+        None means ffprobe is missing, the probe failed, or the file carries no
+        audio stream. JSON output is parsed so the two fields are unambiguous
+        regardless of ffprobe's CSV field ordering.
+        """
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    ffprobe,
+                    "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=sample_rate,channels",
+                    "-of", "json",
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            streams = json.loads(proc.stdout).get("streams", [])
+        except (json.JSONDecodeError, AttributeError):
+            return None
+        if not streams:
+            return None
+        stream = streams[0]
+        try:
+            sample_rate = int(stream["sample_rate"])
+            channels = int(stream["channels"])
+        except (KeyError, ValueError, TypeError):
+            return None
+        if sample_rate <= 0 or channels <= 0:
+            return None
+        return sample_rate, channels
 
     def _write_frames_ffmpeg(
         self,
