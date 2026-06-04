@@ -15,8 +15,8 @@ from ai_core.face_anonymization.face_anonymizer import (
     AnonymizationMethod,
     FaceAnonymizer,
 )
-from ai_core.face_anonymization.face_swap_offline import OfflineFaceSwapStabilizer
-from ai_core.face_anonymization.face_swap_stabilizer import FaceSwapStabilizer
+from ai_core.face_swapping.face_swap_offline import OfflineFaceSwapStabilizer
+from ai_core.face_swapping.face_swap_stabilizer import FaceSwapStabilizer
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
 from ai_core.video_io.video_io import VideoIO, VideoMetadata

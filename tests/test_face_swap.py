@@ -3,11 +3,11 @@
 Usage:
     python tests/test_face_swap.py \
         --image test_images/test5.jpeg \
-        [--source ai_core/face_anonymization/source_img.png] \
+        [--source ai_core/face_swapping/source_img.png] \
         [--model /path/to/blendswap_256.onnx]
 
-If --model is omitted the BlendSwap model is downloaded from Hugging Face
-(facefusion/models-3.0.0, ~1.66 GB) and cached locally.
+If --model is omitted the bundled BlendSwap model at
+ai_core/face_swapping/onnx/blendswap_256.onnx is used.
 """
 
 import argparse
@@ -17,9 +17,9 @@ import cv2
 
 from ai_core.face_alignment.face_aligner import FaceAligner
 from ai_core.face_anonymization.face_anonymizer import FaceAnonymizer
-from ai_core.face_anonymization.face_parser import FaceParser
-from ai_core.face_anonymization.face_restorer import FaceRestorer
-from ai_core.face_anonymization.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
+from ai_core.face_parsing.face_parser import FaceParser
+from ai_core.face_restoration.face_restorer import FaceRestorer
+from ai_core.face_swapping.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
 from ai_core.face_detection.face_detector import FaceDetector
 
 
@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help="Path to blendswap_256.onnx (downloaded from HF if omitted).",
+        help="Path to blendswap_256.onnx (default: bundled onnx/ model).",
     )
     parser.add_argument(
         "--no-region-mask",
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parser-model",
         default=None,
-        help="Path to bisenet_resnet_34.onnx (downloaded from HF if omitted).",
+        help="Path to bisenet_resnet_34.onnx (default: bundled onnx/ model).",
     )
     parser.add_argument(
         "--no-restore",
@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--restore-model",
         default=None,
-        help="Path to gfpgan_1.4.onnx (downloaded from HF if omitted).",
+        help="Path to gfpgan_1.4.onnx (default: bundled onnx/ model).",
     )
     parser.add_argument(
         "--restore-blend",

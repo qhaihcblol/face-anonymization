@@ -5,9 +5,9 @@ from pathlib import Path
 
 from ai_core.face_alignment.face_aligner import FaceAligner
 from ai_core.face_anonymization.face_anonymizer import FaceAnonymizer
-from ai_core.face_anonymization.face_parser import FaceParser
-from ai_core.face_anonymization.face_restorer import FaceRestorer
-from ai_core.face_anonymization.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
+from ai_core.face_parsing.face_parser import FaceParser
+from ai_core.face_restoration.face_restorer import FaceRestorer
+from ai_core.face_swapping.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
 from ai_core.video_anonymization import VideoAnonymization
@@ -48,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         type=Path,
         default=None,
-        help="Path to blendswap_256.onnx (downloaded from HF if omitted)",
+        help="Path to blendswap_256.onnx (default: bundled onnx/ model)",
     )
     parser.add_argument(
         "--no-region-mask",
@@ -59,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--parser-model",
         type=Path,
         default=None,
-        help="Path to bisenet_resnet_34.onnx (downloaded from HF if omitted)",
+        help="Path to bisenet_resnet_34.onnx (default: bundled onnx/ model)",
     )
     parser.add_argument(
         "--no-restore",
@@ -70,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--restore-model",
         type=Path,
         default=None,
-        help="Path to gfpgan_1.4.onnx (downloaded from HF if omitted)",
+        help="Path to gfpgan_1.4.onnx (default: bundled onnx/ model)",
     )
     parser.add_argument(
         "--restore-blend",

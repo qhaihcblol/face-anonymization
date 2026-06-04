@@ -77,7 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--parser-model",
         type=Path,
         default=None,
-        help="Path to bisenet_resnet_34.onnx (default: auto-download from HF)",
+        help="Path to bisenet_resnet_34.onnx (default: bundled onnx/ model)",
     )
     parser.add_argument(
         "--mask-feather",
@@ -163,7 +163,7 @@ def main() -> None:
         # Lazy imports: only needed (and only download the parser model) when the
         # precise-mask path is requested.
         from ai_core.face_alignment.face_aligner import AlignMode, FaceAligner
-        from ai_core.face_anonymization.face_parser import FaceParser
+        from ai_core.face_parsing.face_parser import FaceParser
 
         face_parser = FaceParser(model_path=args.parser_model)
         # FFHQ-512 gives the parser a large, well-centred crop to segment.

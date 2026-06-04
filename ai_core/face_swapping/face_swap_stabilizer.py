@@ -12,7 +12,7 @@ from ai_core.face_detection.face_detector import (
     FaceDetector,
     FaceLandmarks,
 )
-from ai_core.face_anonymization.face_swapper import FaceSwapper
+from ai_core.face_swapping.face_swapper import FaceSwapper
 
 __all__ = ["FaceSwapStabilizer", "OneEuroFilter"]
 

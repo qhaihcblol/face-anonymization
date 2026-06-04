@@ -22,7 +22,7 @@ DEFAULT_ENCODER_ONNX: Path = _MODULE_DIR / "onnx" / "wavlm_encoder.onnx"
 DEFAULT_VOCODER_ONNX: Path = _MODULE_DIR / "onnx" / "hifigan_vocoder.onnx"
 
 # reference_voice.wav (the target pseudo-identity) ships next to this module — the
-# audio analog of face_anonymization/source_img.png. Supplied by the user.
+# audio analog of face_swapping/source_img.png. Supplied by the user.
 DEFAULT_REFERENCE_VOICE: Path = _MODULE_DIR / "reference_voice.wav"
 
 # WavLM (and the matched HiFi-GAN) operate at 16 kHz.

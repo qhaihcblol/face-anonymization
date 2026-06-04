@@ -137,8 +137,8 @@ class Settings(BaseSettings):
 
     @property
     def resolved_blendswap_onnx_path(self) -> Path | None:
-        # When unset, FaceSwapper auto-downloads blendswap_256.onnx from the
-        # FaceFusion Hugging Face hub; an explicit path skips that download.
+        # When unset, FaceSwapper uses the bundled model at
+        # ai_core/face_swapping/onnx/blendswap_256.onnx.
         if not self.blendswap_onnx_path:
             return None
         configured = Path(self.blendswap_onnx_path)

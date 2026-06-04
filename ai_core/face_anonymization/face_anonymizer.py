@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Any, Sequence
 import cv2
 import numpy as np
 
-from ai_core.face_anonymization.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
+from ai_core.face_swapping.face_swapper import DEFAULT_SOURCE_FACE, FaceSwapper
 from ai_core.face_detection.face_detector import FaceDetection, FaceLandmarks
 
 if TYPE_CHECKING:
     from ai_core.face_alignment.face_aligner import AlignedFace, FaceAligner
-    from ai_core.face_anonymization.face_parser import FaceParser
+    from ai_core.face_parsing.face_parser import FaceParser
 
 SOURCE_FACE = DEFAULT_SOURCE_FACE
 
@@ -304,7 +304,7 @@ class FaceAnonymizer:
         """Replace every aligned face in ``image`` with the source identity.
 
         Uses the BlendSwap (blendface) model via the configured
-        :class:`~ai_core.face_anonymization.face_swapper.FaceSwapper`. The source
+        :class:`~ai_core.face_swapping.face_swapper.FaceSwapper`. The source
         identity is taken from ``source_img.png`` and ``aligned_faces`` are the
         target faces (as produced by ``FaceAligner``).
         """

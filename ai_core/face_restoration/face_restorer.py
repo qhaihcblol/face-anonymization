@@ -7,11 +7,12 @@ from typing import Any, Sequence, cast
 import cv2
 import numpy as np
 
-__all__ = ["FaceRestorer"]
+__all__ = ["FaceRestorer", "DEFAULT_RESTORER_ONNX"]
 
-# gfpgan_1.4.onnx lives in the same FaceFusion model hub as BlendSwap / BiSeNet.
-_HF_REPO_ID = "facefusion/models-3.0.0"
-_HF_FILENAME = "gfpgan_1.4.onnx"
+# gfpgan_1.4.onnx (FaceFusion) ships in onnx/ next to this module.
+DEFAULT_RESTORER_ONNX: Path = (
+    Path(__file__).resolve().parent / "onnx" / "gfpgan_1.4.onnx"
+)
 
 
 class FaceRestorer:
@@ -29,19 +30,17 @@ class FaceRestorer:
     def __init__(
         self,
         *,
-        model_path: str | Path | None = None,
+        model_path: str | Path | None = DEFAULT_RESTORER_ONNX,
         blend: float = 0.8,
         providers: Sequence[str] | None = None,
         intra_op_num_threads: int | None = None,
-        hf_repo_id: str = _HF_REPO_ID,
-        hf_filename: str = _HF_FILENAME,
     ) -> None:
         # blend: how much of the restored face to mix back (1 = full restore,
         # 0 = original). Keeping a little of the original avoids over-processing.
         self.blend = float(np.clip(blend, 0.0, 1.0))
 
         self._ort = self._import_onnxruntime()
-        self.model_path = self._resolve_model_path(model_path, hf_repo_id, hf_filename)
+        self.model_path = self._resolve_model_path(model_path)
         self.session = self._create_session(providers, intra_op_num_threads)
         self._input_name = str(self.session.get_inputs()[0].name)
         self.model_size = self._resolve_model_size()
@@ -108,26 +107,11 @@ class FaceRestorer:
             ) from exc
 
     @staticmethod
-    def _resolve_model_path(
-        model_path: str | Path | None,
-        repo_id: str,
-        filename: str,
-    ) -> Path:
-        if model_path is not None:
-            path = Path(model_path)
-            if not path.is_file():
-                raise FileNotFoundError(f"ONNX model not found: {path}")
-            return path
-
-        try:
-            hub = importlib.import_module("huggingface_hub")
-        except ImportError as exc:
-            raise ImportError(
-                "huggingface-hub is required to auto-download the face restorer model. "
-                "Install `huggingface-hub` or pass model_path explicitly."
-            ) from exc
-
-        return Path(hub.hf_hub_download(repo_id=repo_id, filename=filename))
+    def _resolve_model_path(model_path: str | Path | None) -> Path:
+        path = Path(model_path) if model_path is not None else DEFAULT_RESTORER_ONNX
+        if not path.is_file():
+            raise FileNotFoundError(f"ONNX model not found: {path}")
+        return path
 
     def _create_session(
         self,

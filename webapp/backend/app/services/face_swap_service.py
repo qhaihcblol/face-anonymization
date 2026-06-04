@@ -36,7 +36,7 @@ class FaceSwapService:
         # Imported here (not at module load) so the ONNX/BlendSwap dependencies are
         # only required when face swap is actually requested.
         from ai_core.face_anonymization.face_anonymizer import FaceAnonymizer
-        from ai_core.face_anonymization.face_swapper import FaceSwapper
+        from ai_core.face_swapping.face_swapper import FaceSwapper
         from ai_core.video_anonymization import VideoAnonymization
 
         base = self.video_service.pipeline

@@ -8,22 +8,23 @@ import cv2
 import numpy as np
 
 from ai_core.face_alignment.face_aligner import AlignedFace, AlignMode, FaceAligner
-from ai_core.face_anonymization.face_parser import FaceParser
-from ai_core.face_anonymization.face_restorer import FaceRestorer
+from ai_core.face_parsing.face_parser import FaceParser
+from ai_core.face_restoration.face_restorer import FaceRestorer
 from ai_core.face_detection.face_detector import (
     FaceDetection,
     FaceDetector,
     FaceLandmarks,
 )
 
-__all__ = ["FaceSwapper", "DEFAULT_SOURCE_FACE"]
+__all__ = ["FaceSwapper", "DEFAULT_SOURCE_FACE", "DEFAULT_SWAPPER_ONNX"]
 
 # source_img.png ships next to this module.
 DEFAULT_SOURCE_FACE: Path = Path(__file__).resolve().parent / "source_img.png"
 
-# blendswap_256.onnx lives in the FaceFusion model hub.
-_HF_REPO_ID = "facefusion/models-3.0.0"
-_HF_FILENAME = "blendswap_256.onnx"
+# blendswap_256.onnx (FaceFusion) ships in onnx/ next to this module.
+DEFAULT_SWAPPER_ONNX: Path = (
+    Path(__file__).resolve().parent / "onnx" / "blendswap_256.onnx"
+)
 
 
 class FaceSwapper:
@@ -49,7 +50,7 @@ class FaceSwapper:
         self,
         detector: FaceDetector,
         *,
-        model_path: str | Path | None = None,
+        model_path: str | Path | None = DEFAULT_SWAPPER_ONNX,
         source_path: str | Path = DEFAULT_SOURCE_FACE,
         mask_blur: float = 0.1,
         color_correction: bool = True,
@@ -57,8 +58,6 @@ class FaceSwapper:
         face_restorer: FaceRestorer | None = None,
         providers: Sequence[str] | None = None,
         intra_op_num_threads: int | None = None,
-        hf_repo_id: str = _HF_REPO_ID,
-        hf_filename: str = _HF_FILENAME,
     ) -> None:
         if not isinstance(detector, FaceDetector):
             raise TypeError("detector must be a FaceDetector")
@@ -81,7 +80,7 @@ class FaceSwapper:
         self._face_mask = self._build_face_mask()
 
         self._ort = self._import_onnxruntime()
-        self.model_path = self._resolve_model_path(model_path, hf_repo_id, hf_filename)
+        self.model_path = self._resolve_model_path(model_path)
         self.session = self._create_session(providers, intra_op_num_threads)
         self._source_input_name, self._target_input_name = self._resolve_input_names()
 
@@ -359,26 +358,11 @@ class FaceSwapper:
             ) from exc
 
     @staticmethod
-    def _resolve_model_path(
-        model_path: str | Path | None,
-        repo_id: str,
-        filename: str,
-    ) -> Path:
-        if model_path is not None:
-            path = Path(model_path)
-            if not path.is_file():
-                raise FileNotFoundError(f"ONNX model not found: {path}")
-            return path
-
-        try:
-            hub = importlib.import_module("huggingface_hub")
-        except ImportError as exc:
-            raise ImportError(
-                "huggingface-hub is required to auto-download the BlendSwap model. "
-                "Install `huggingface-hub` or pass model_path explicitly."
-            ) from exc
-
-        return Path(hub.hf_hub_download(repo_id=repo_id, filename=filename))
+    def _resolve_model_path(model_path: str | Path | None) -> Path:
+        path = Path(model_path) if model_path is not None else DEFAULT_SWAPPER_ONNX
+        if not path.is_file():
+            raise FileNotFoundError(f"ONNX model not found: {path}")
+        return path
 
     def _create_session(
         self,
