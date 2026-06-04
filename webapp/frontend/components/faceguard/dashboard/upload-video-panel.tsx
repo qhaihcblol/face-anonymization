@@ -2,11 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AudioLines,
   CheckCircle2,
   FileVideo,
   FolderUp,
   Loader2,
+  ScanFace,
   ShieldCheck,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,7 +37,12 @@ import {
   uploadVideo,
   VideoApiError,
 } from '@/lib/video/client'
-import type { AnonymizeMethod } from '@/lib/video/types'
+import type {
+  AnonymizeMethod,
+  AnonymizeRequest,
+  VoiceMethod,
+  VoiceParams,
+} from '@/lib/video/types'
 
 type FilterPreset = AnonymizeMethod | 'swap'
 
@@ -42,11 +50,11 @@ type ProcessingStatus = 'uploading' | 'processing' | null
 
 type LastRun = {
   filter: FilterPreset
+  voiceMethod: VoiceMethod
   targetFps: number
   startSec?: number
   endSec?: number
   drawTracks: boolean
-  stabilize: boolean
   elapsedSec: number
 }
 
@@ -65,8 +73,47 @@ const filterOptions: Array<{ value: FilterPreset; label: string }> = [
   { value: 'swap', label: 'Face Swap' },
 ]
 
+const voiceOptions: Array<{ value: VoiceMethod; label: string }> = [
+  { value: 'none', label: 'Keep original' },
+  { value: 'mcadams', label: 'McAdams (recommended)' },
+  { value: 'pitch', label: 'Pitch shift' },
+  { value: 'formant', label: 'Formant shift' },
+  { value: 'pitch_formant', label: 'Pitch + Formant' },
+  { value: 'convert', label: 'Voice conversion (AI)' },
+]
+
 function getFilterLabel(value: FilterPreset): string {
   return filterOptions.find((option) => option.value === value)?.label ?? value
+}
+
+function getVoiceLabel(value: VoiceMethod): string {
+  return voiceOptions.find((option) => option.value === value)?.label ?? value
+}
+
+function usesPitch(method: VoiceMethod): boolean {
+  return method === 'pitch' || method === 'pitch_formant'
+}
+
+function usesFormant(method: VoiceMethod): boolean {
+  return method === 'formant' || method === 'pitch_formant'
+}
+
+function parseNumberInput(value: string, fieldName: string): number {
+  const parsed = Number(value.trim())
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${fieldName} must be a number.`)
+  }
+
+  return parsed
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const normalized = hex.replace('#', '')
+  return [
+    parseInt(normalized.slice(0, 2), 16),
+    parseInt(normalized.slice(2, 4), 16),
+    parseInt(normalized.slice(4, 6), 16),
+  ]
 }
 
 function parseOptionalSecond(value: string, fieldName: string): number | undefined {
@@ -101,7 +148,13 @@ export function UploadVideoPanel() {
   const [startSecInput, setStartSecInput] = useState('')
   const [endSecInput, setEndSecInput] = useState('')
   const [showBoundingBox, setShowBoundingBox] = useState(true)
-  const [stabilize, setStabilize] = useState(true)
+  const [blurStrengthInput, setBlurStrengthInput] = useState('31')
+  const [pixelationLevelInput, setPixelationLevelInput] = useState('16')
+  const [maskColor, setMaskColor] = useState('#a0a0a0')
+  const [voiceMethod, setVoiceMethod] = useState<VoiceMethod>('mcadams')
+  const [pitchStepsInput, setPitchStepsInput] = useState('-4')
+  const [formantShiftInput, setFormantShiftInput] = useState('1.2')
+  const [mcadamsAlphaInput, setMcadamsAlphaInput] = useState('0.8')
   const [isProcessing, setIsProcessing] = useState(false)
   const [processingStatus, setProcessingStatus] = useState<ProcessingStatus>(null)
   const [processingProgress, setProcessingProgress] = useState(0)
@@ -184,14 +237,51 @@ export function UploadVideoPanel() {
     return { targetFps, startSec, endSec }
   }
 
+  const buildVoiceParams = (): VoiceParams => {
+    const payload: VoiceParams = { voice_method: voiceMethod }
+
+    if (usesPitch(voiceMethod)) {
+      payload.pitch_steps = parseNumberInput(pitchStepsInput, 'Pitch shift')
+    }
+    if (usesFormant(voiceMethod)) {
+      payload.formant_shift = parseNumberInput(formantShiftInput, 'Formant shift')
+    }
+    if (voiceMethod === 'mcadams') {
+      payload.mcadams_alpha = parseNumberInput(mcadamsAlphaInput, 'Warp strength')
+    }
+
+    return payload
+  }
+
+  // Appearance controls for the bbox-based filters (not Face Swap). Each method has at
+  // most one knob, so only the relevant field is parsed and sent.
+  const buildFilterParams = (): Partial<AnonymizeRequest> => {
+    if (filter === 'blur') {
+      return { blur_strength: parseNumberInput(blurStrengthInput, 'Blur strength') }
+    }
+    if (filter === 'pixelate') {
+      return {
+        pixelation_level: parseNumberInput(pixelationLevelInput, 'Pixelation level'),
+      }
+    }
+    if (filter === 'mask') {
+      return { mask_color: hexToRgb(maskColor) }
+    }
+    return {}
+  }
+
   const activateGuard = async () => {
     if (!selectedFile || isProcessing) {
       return
     }
 
     let params: ProcessingParams
+    let voiceParams: VoiceParams
+    let filterParams: Partial<AnonymizeRequest>
     try {
       params = buildProcessingParams()
+      voiceParams = buildVoiceParams()
+      filterParams = buildFilterParams()
     } catch (error) {
       setFormError(
         error instanceof Error ? error.message : 'Invalid processing parameters.',
@@ -220,7 +310,9 @@ export function UploadVideoPanel() {
             target_fps: params.targetFps,
             start_sec: params.startSec,
             end_sec: params.endSec,
-            stabilize,
+            // Temporal stabilization is always on for the best swap quality.
+            stabilize: true,
+            ...voiceParams,
           })
         : await anonymizeVideo(videoId, {
             method: filter,
@@ -228,6 +320,8 @@ export function UploadVideoPanel() {
             start_sec: params.startSec,
             end_sec: params.endSec,
             draw_tracks: showBoundingBox,
+            ...filterParams,
+            ...voiceParams,
           })
 
       runCounterRef.current += 1
@@ -240,11 +334,11 @@ export function UploadVideoPanel() {
       setResultVideoUrl(bustedUrl)
       setLastRun({
         filter,
+        voiceMethod,
         targetFps: params.targetFps,
         startSec: params.startSec,
         endSec: params.endSec,
         drawTracks: showBoundingBox,
-        stabilize,
         elapsedSec,
       })
     } catch (error) {
@@ -343,140 +437,325 @@ export function UploadVideoPanel() {
 
       <Card className="border-cyan-300/30 bg-background/75 backdrop-blur-sm">
         <CardHeader>
-          <CardTitle className="text-xl tracking-tight">Filter and Overlay</CardTitle>
+          <CardTitle className="text-xl tracking-tight">Protection Settings</CardTitle>
           <CardDescription>
-            Configure processing options and run protection for the selected video.
+            Configure face and voice protection, then run it on the selected video.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="space-y-2">
-            <Label htmlFor="filter-select">Privacy Filter</Label>
-            <Select
-              value={filter}
-              onValueChange={(value) => {
-                setFilter(value as FilterPreset)
-                setFormError(null)
-              }}
-            >
-              <SelectTrigger id="filter-select" className="w-full border-cyan-300/35">
-                <SelectValue placeholder="Select filter" />
-              </SelectTrigger>
-              <SelectContent>
-                {filterOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {isFaceSwap && (
+        <CardContent className="space-y-6">
+          {/* Face privacy */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-cyan-700 dark:text-cyan-200">
+              <ScanFace className="size-4" />
+              <h3 className="text-xs font-semibold tracking-[0.14em] uppercase">
+                Face Privacy
+              </h3>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="filter-select">Privacy Filter</Label>
+              <Select
+                value={filter}
+                onValueChange={(value) => {
+                  setFilter(value as FilterPreset)
+                  setFormError(null)
+                }}
+              >
+                <SelectTrigger id="filter-select" className="w-full border-cyan-300/35">
+                  <SelectValue placeholder="Select filter" />
+                </SelectTrigger>
+                <SelectContent>
+                  {filterOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {isFaceSwap && (
+                <p className="text-xs text-muted-foreground">
+                  Replaces every detected face with the bundled source identity using
+                  the BlendSwap model.
+                </p>
+              )}
+            </div>
+
+            {filter === 'blur' && (
+              <div className="space-y-2">
+                <Label htmlFor="blur-strength">Blur strength</Label>
+                <Input
+                  id="blur-strength"
+                  type="number"
+                  min={3}
+                  step={2}
+                  inputMode="numeric"
+                  value={blurStrengthInput}
+                  onChange={(event) => {
+                    setBlurStrengthInput(event.target.value)
+                    setFormError(null)
+                  }}
+                  className="border-cyan-300/35"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Gaussian kernel size — higher is blurrier (rounded up to an odd
+                  number).
+                </p>
+              </div>
+            )}
+
+            {filter === 'pixelate' && (
+              <div className="space-y-2">
+                <Label htmlFor="pixelation-level">Pixelation level</Label>
+                <Input
+                  id="pixelation-level"
+                  type="number"
+                  min={4}
+                  step={1}
+                  inputMode="numeric"
+                  value={pixelationLevelInput}
+                  onChange={(event) => {
+                    setPixelationLevelInput(event.target.value)
+                    setFormError(null)
+                  }}
+                  className="border-cyan-300/35"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Lower means chunkier blocks (more obscured).
+                </p>
+              </div>
+            )}
+
+            {filter === 'mask' && (
+              <div className="space-y-2">
+                <Label htmlFor="mask-color">Mask color</Label>
+                <div className="flex items-center gap-3">
+                  <input
+                    id="mask-color"
+                    type="color"
+                    value={maskColor}
+                    onChange={(event) => {
+                      setMaskColor(event.target.value)
+                      setFormError(null)
+                    }}
+                    className="h-9 w-14 cursor-pointer rounded-md border border-cyan-300/35 bg-transparent p-1"
+                  />
+                  <span className="text-xs text-muted-foreground uppercase">
+                    {maskColor}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Solid fill drawn over the detected face region.
+                </p>
+              </div>
+            )}
+
+            {filter === 'blackout' && (
               <p className="text-xs text-muted-foreground">
-                Replaces every detected face with the bundled source identity using
-                the BlendSwap model.
+                Fills the detected face region with solid black.
               </p>
             )}
-          </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="target-fps">Target FPS</Label>
-            <Input
-              id="target-fps"
-              type="number"
-              min={1}
-              step={1}
-              inputMode="numeric"
-              value={targetFpsInput}
-              onChange={(event) => {
-                setTargetFpsInput(event.target.value)
-                setFormError(null)
-              }}
-              className="border-cyan-300/35"
-            />
-            <p className="text-xs text-muted-foreground">
-              This value is sent as `target_fps` in the processing request.
-            </p>
-          </div>
+            {filter === 'none' && (
+              <p className="text-xs text-muted-foreground">
+                No face filter is applied — only voice and range settings run.
+              </p>
+            )}
 
-          <div className="grid gap-3 sm:grid-cols-2">
+            {!isFaceSwap && (
+              <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
+                <Label htmlFor="show-bounding-box" className="text-sm">
+                  Show Bounding Box
+                </Label>
+                <Switch
+                  id="show-bounding-box"
+                  checked={showBoundingBox}
+                  onCheckedChange={(checked) => {
+                    setShowBoundingBox(checked)
+                    setFormError(null)
+                  }}
+                />
+              </div>
+            )}
+          </section>
+
+          {/* Voice privacy */}
+          <section className="space-y-4 border-t border-cyan-300/15 pt-5">
+            <div className="flex items-center gap-2 text-cyan-700 dark:text-cyan-200">
+              <AudioLines className="size-4" />
+              <h3 className="text-xs font-semibold tracking-[0.14em] uppercase">
+                Voice Privacy
+              </h3>
+            </div>
+
             <div className="space-y-2">
-              <Label htmlFor="start-sec">Start sec</Label>
+              <Label htmlFor="voice-select">Voice Method</Label>
+              <Select
+                value={voiceMethod}
+                onValueChange={(value) => {
+                  setVoiceMethod(value as VoiceMethod)
+                  setFormError(null)
+                }}
+              >
+                <SelectTrigger id="voice-select" className="w-full border-cyan-300/35">
+                  <SelectValue placeholder="Select voice method" />
+                </SelectTrigger>
+                <SelectContent>
+                  {voiceOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {(usesPitch(voiceMethod) || usesFormant(voiceMethod)) && (
+              <div
+                className={`grid gap-3 ${
+                  usesPitch(voiceMethod) && usesFormant(voiceMethod)
+                    ? 'sm:grid-cols-2'
+                    : 'grid-cols-1'
+                }`}
+              >
+                {usesPitch(voiceMethod) && (
+                  <div className="space-y-2">
+                    <Label htmlFor="pitch-steps">Pitch shift (semitones)</Label>
+                    <Input
+                      id="pitch-steps"
+                      type="number"
+                      step={1}
+                      inputMode="decimal"
+                      value={pitchStepsInput}
+                      onChange={(event) => {
+                        setPitchStepsInput(event.target.value)
+                        setFormError(null)
+                      }}
+                      className="border-cyan-300/35"
+                    />
+                  </div>
+                )}
+
+                {usesFormant(voiceMethod) && (
+                  <div className="space-y-2">
+                    <Label htmlFor="formant-shift">Formant shift</Label>
+                    <Input
+                      id="formant-shift"
+                      type="number"
+                      step={0.05}
+                      min={0.5}
+                      inputMode="decimal"
+                      value={formantShiftInput}
+                      onChange={(event) => {
+                        setFormantShiftInput(event.target.value)
+                        setFormError(null)
+                      }}
+                      className="border-cyan-300/35"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {voiceMethod === 'mcadams' && (
+              <div className="space-y-2">
+                <Label htmlFor="mcadams-alpha">Warp strength</Label>
+                <Input
+                  id="mcadams-alpha"
+                  type="number"
+                  step={0.05}
+                  min={0.5}
+                  inputMode="decimal"
+                  value={mcadamsAlphaInput}
+                  onChange={(event) => {
+                    setMcadamsAlphaInput(event.target.value)
+                    setFormError(null)
+                  }}
+                  className="border-cyan-300/35"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Formant warp that keeps pitch and timing — values further from 1.0 are
+                  stronger.
+                </p>
+              </div>
+            )}
+
+            {voiceMethod === 'convert' && (
+              <p className="text-xs text-muted-foreground">
+                Model-based voice conversion toward the bundled reference voice.
+              </p>
+            )}
+
+            {voiceMethod === 'none' && (
+              <p className="text-xs text-muted-foreground">
+                Keeps the original audio track unchanged.
+              </p>
+            )}
+          </section>
+
+          {/* Processing range */}
+          <section className="space-y-4 border-t border-cyan-300/15 pt-5">
+            <div className="flex items-center gap-2 text-cyan-700 dark:text-cyan-200">
+              <SlidersHorizontal className="size-4" />
+              <h3 className="text-xs font-semibold tracking-[0.14em] uppercase">
+                Processing Range
+              </h3>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="target-fps">Target FPS</Label>
               <Input
-                id="start-sec"
+                id="target-fps"
                 type="number"
-                min={0}
-                step={0.1}
-                inputMode="decimal"
-                placeholder="Auto"
-                value={startSecInput}
+                min={1}
+                step={1}
+                inputMode="numeric"
+                value={targetFpsInput}
                 onChange={(event) => {
-                  setStartSecInput(event.target.value)
+                  setTargetFpsInput(event.target.value)
                   setFormError(null)
                 }}
                 className="border-cyan-300/35"
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="end-sec">End sec</Label>
-              <Input
-                id="end-sec"
-                type="number"
-                min={0}
-                step={0.1}
-                inputMode="decimal"
-                placeholder="Auto"
-                value={endSecInput}
-                onChange={(event) => {
-                  setEndSecInput(event.target.value)
-                  setFormError(null)
-                }}
-                className="border-cyan-300/35"
-              />
-            </div>
-          </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="start-sec">Start sec</Label>
+                <Input
+                  id="start-sec"
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  inputMode="decimal"
+                  placeholder="Auto"
+                  value={startSecInput}
+                  onChange={(event) => {
+                    setStartSecInput(event.target.value)
+                    setFormError(null)
+                  }}
+                  className="border-cyan-300/35"
+                />
+              </div>
 
-          {isFaceSwap ? (
-            <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
-              <Label htmlFor="stabilize" className="text-sm">
-                Temporal Stabilization
-              </Label>
-              <Switch
-                id="stabilize"
-                checked={stabilize}
-                onCheckedChange={(checked) => {
-                  setStabilize(checked)
-                  setFormError(null)
-                }}
-              />
+              <div className="space-y-2">
+                <Label htmlFor="end-sec">End sec</Label>
+                <Input
+                  id="end-sec"
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  inputMode="decimal"
+                  placeholder="Auto"
+                  value={endSecInput}
+                  onChange={(event) => {
+                    setEndSecInput(event.target.value)
+                    setFormError(null)
+                  }}
+                  className="border-cyan-300/35"
+                />
+              </div>
             </div>
-          ) : (
-            <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-3 py-2">
-              <Label htmlFor="show-bounding-box" className="text-sm">
-                Show Bounding Box
-              </Label>
-              <Switch
-                id="show-bounding-box"
-                checked={showBoundingBox}
-                onCheckedChange={(checked) => {
-                  setShowBoundingBox(checked)
-                  setFormError(null)
-                }}
-              />
-            </div>
-          )}
-
-          <div className="rounded-lg border border-cyan-300/20 bg-linear-to-r from-cyan-500/14 via-cyan-400/8 to-transparent px-4 py-3">
-            <p className="text-sm font-semibold text-foreground">Current Settings</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Filter {getFilterLabel(filter)} | FPS {targetFpsInput.trim() || '--'} |
-              {' '}
-              Range {startSecInput.trim() || 'auto'}s to {endSecInput.trim() || 'auto'}s |
-              {' '}
-              {isFaceSwap
-                ? `Stabilization ${stabilize ? 'On' : 'Off'}`
-                : `Bounding Box ${showBoundingBox ? 'On' : 'Off'}`}
-            </p>
-          </div>
+          </section>
 
           {formError && (
             <div className="rounded-lg border border-red-400/35 bg-red-500/10 px-3 py-2 text-xs text-red-100">
@@ -577,13 +856,15 @@ export function UploadVideoPanel() {
             <p className="mt-1 text-xs text-muted-foreground">
               {lastRun ? (
                 <>
-                  Mode: {getFilterLabel(lastRun.filter)} | Target {lastRun.targetFps} FPS |
+                  Face: {getFilterLabel(lastRun.filter)} |
                   {' '}
-                  Range {lastRun.startSec ?? 'auto'}s to {lastRun.endSec ?? 'auto'}s |
+                  Voice: {getVoiceLabel(lastRun.voiceMethod)} |
                   {' '}
-                  {lastRun.filter === 'swap'
-                    ? `Stabilization ${lastRun.stabilize ? 'On' : 'Off'}`
-                    : `Bounding Box ${lastRun.drawTracks ? 'On' : 'Off'}`}
+                  Target {lastRun.targetFps} FPS |
+                  {' '}
+                  Range {lastRun.startSec ?? 'auto'}s to {lastRun.endSec ?? 'auto'}s
+                  {lastRun.filter !== 'swap' &&
+                    ` | Bounding Box ${lastRun.drawTracks ? 'On' : 'Off'}`}
                   {' '}
                   | {lastRun.elapsedSec.toFixed(1)}s
                 </>

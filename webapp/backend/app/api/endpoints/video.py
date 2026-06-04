@@ -69,11 +69,19 @@ async def anonymize_video(
         draw_tracks=payload.draw_tracks,
         codec=payload.codec,
         progress_every=payload.progress_every,
+        blur_strength=payload.blur_strength,
+        pixelation_level=payload.pixelation_level,
+        mask_color=payload.mask_color,
+        voice_method=payload.voice_method,
+        pitch_steps=payload.pitch_steps,
+        formant_shift=payload.formant_shift,
+        mcadams_alpha=payload.mcadams_alpha,
     )
 
     return VideoAnonymizeResponse(
         video_id=video_id,
         method=payload.method,
+        voice_method=payload.voice_method,
         target_fps=payload.target_fps,
         start_sec=payload.start_sec,
         end_sec=payload.end_sec,
@@ -103,10 +111,15 @@ async def face_swap_video(
         smooth_beta=payload.smooth_beta,
         output_smooth=payload.output_smooth,
         mask_smooth=payload.mask_smooth,
+        voice_method=payload.voice_method,
+        pitch_steps=payload.pitch_steps,
+        formant_shift=payload.formant_shift,
+        mcadams_alpha=payload.mcadams_alpha,
     )
 
     return VideoFaceSwapResponse(
         video_id=video_id,
+        voice_method=payload.voice_method,
         target_fps=payload.target_fps,
         start_sec=payload.start_sec,
         end_sec=payload.end_sec,
