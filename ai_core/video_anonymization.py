@@ -1,7 +1,26 @@
+"""Top-level video anonymization orchestration.
+
+The business logic is split into three clearly separated layers so the visual
+(image) path and the audio path never bleed into each other:
+
+* ``anonymize_video`` — the *master*. It prepares a :class:`_RunContext`, builds
+  the visual frame stream, builds the audio source, then writes the result.
+* ``_build_visual_pipeline`` — *image only*. Branches between the model-based face
+  swap and the no-model obfuscation (blur / pixelate / mask / blackout / none) and
+  returns a lazy iterator of output frames.
+* ``_build_audio_pipeline`` — *audio only*. Branches between muting, muxing the
+  original track, and running the :class:`VoiceAnonymizer` over the trimmed window.
+* ``_write_result`` — encodes the frames and muxes the chosen audio.
+
+Callers describe *what* to do with two config objects — :class:`VisualOptions`
+(or :class:`SwapOptions`) for the image and :class:`AudioOptions` for the sound —
+which keeps the two concerns from getting tangled in a single wide signature.
+"""
 from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 import tempfile
 import time
@@ -25,6 +44,126 @@ from ai_core.voice_anonymization.voice_anonymizer import (
     VoiceAnonymizer,
 )
 
+__all__ = [
+    "AudioMode",
+    "AudioOptions",
+    "SwapOptions",
+    "VideoAnonymization",
+    "VideoAnonymizationResult",
+    "VisualOptions",
+]
+
+
+# --------------------------------------------------------------------------- #
+# Configuration objects: one for the image concern, one for the audio concern. #
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class VisualOptions:
+    """No-model obfuscation of faces (blur / pixelate / mask / blackout / none).
+
+    This is the *image* concern for the detector + tracker + anonymizer path.
+    Use :class:`SwapOptions` instead to drive the model-based face swap.
+    """
+
+    method: AnonymizationMethod | str = AnonymizationMethod.BLUR
+    # Run the detector every N frames (>= 1); in-between frames reuse tracker
+    # predictions. 1 = detect on every frame.
+    detect_interval: int = 1
+    # Also anonymize "New" (unconfirmed) tracks, not just confirmed "Tracked" ones.
+    blur_new: bool = False
+    # Overlay tracker boxes/ids on the output (debug visualization).
+    draw_tracks: bool = False
+
+    @property
+    def resolved_method(self) -> AnonymizationMethod:
+        """Coerce ``method`` to an :class:`AnonymizationMethod`, rejecting SWAP.
+
+        SWAP belongs to the model path; routing it here would be a silent no-op,
+        so it is rejected with a pointer to :class:`SwapOptions`.
+        """
+        method = self.method
+        if isinstance(method, str):
+            method = AnonymizationMethod(method.strip().lower())
+        if not isinstance(method, AnonymizationMethod):
+            raise TypeError(
+                "VisualOptions.method must be AnonymizationMethod or str, "
+                f"got {type(method).__name__}"
+            )
+        if method is AnonymizationMethod.SWAP:
+            raise ValueError(
+                "Face swap is driven by SwapOptions, not "
+                "VisualOptions(method='swap'). Pass visual=SwapOptions(...)."
+            )
+        return method
+
+    @property
+    def resolved_detect_interval(self) -> int:
+        return max(int(self.detect_interval), 1)
+
+
+@dataclass(slots=True)
+class SwapOptions:
+    """Model-based face swap (BlendSwap) with temporal stabilization.
+
+    This is the *image* concern for the face-swap path; it requires the
+    :class:`FaceAnonymizer` to be configured with a ``FaceSwapper``.
+    """
+
+    # Smooth the swap across frames instead of an independent per-frame swap.
+    stabilize: bool = True
+    # 'online' = causal 1-Euro landmark smoothing; 'offline' = 2-pass zero-phase.
+    smoothing: str = "online"
+    # One-Euro knobs (online mode only).
+    smooth_min_cutoff: float = 0.5
+    smooth_beta: float = 0.05
+    # EMA weight on the swapped crop (None = per-mode default: 0.4 online / 0.25
+    # offline). Higher = less flicker.
+    output_smooth: float | None = None
+    # EMA weight on the blend mask (steadier edges).
+    mask_smooth: float = 0.5
+
+    @property
+    def smoothing_mode(self) -> str:
+        return self.smoothing.strip().lower()
+
+    @property
+    def resolved_output_smooth(self) -> float:
+        """Default the crop EMA per smoothing mode when the caller leaves it unset.
+
+        Online's causal 1-Euro leaves residual landmark jitter, so it leans on a
+        stronger EMA (0.4) to damp the per-frame restore/color flicker. Offline's
+        zero-phase landmarks are already steady, so a light EMA (0.25) suffices; a
+        heavier one would reintroduce causal lip-ghosting in pass 2.
+        """
+        if self.output_smooth is not None:
+            return self.output_smooth
+        return 0.25 if self.smoothing_mode == "offline" else 0.4
+
+
+class AudioMode(Enum):
+    """How the audio track is handled, derived from :class:`AudioOptions`."""
+
+    MUTE = "mute"  # drop the audio -> silent output
+    ORIGINAL = "original"  # mux the source track untouched
+    ANONYMIZE = "anonymize"  # run the VoiceAnonymizer, then mux
+
+
+@dataclass(slots=True)
+class AudioOptions:
+    """The *audio* concern, fully independent of the image path."""
+
+    keep_audio: bool = True
+    anonymize_voice: bool = False
+    voice_method: VoiceAnonymizationMethod | str = VoiceAnonymizationMethod.MCADAMS
+
+    @property
+    def mode(self) -> AudioMode:
+        if not self.keep_audio:
+            return AudioMode.MUTE
+        if self.anonymize_voice:
+            return AudioMode.ANONYMIZE
+        return AudioMode.ORIGINAL
+
 
 @dataclass(slots=True)
 class VideoAnonymizationResult:
@@ -32,6 +171,27 @@ class VideoAnonymizationResult:
     output_metadata: VideoMetadata
     elapsed_sec: float
     throughput_fps: float
+
+
+@dataclass(slots=True)
+class _RunContext:
+    """Resolved, validated state shared by the visual, audio and write layers."""
+
+    input_path: Path
+    output_path: Path
+    source_meta: VideoMetadata
+    output_fps: float
+    target_fps: int | None
+    start_sec: float | None
+    end_sec: float | None
+    codec: str
+    progress_every: int
+    visual: VisualOptions | SwapOptions
+    audio: AudioOptions
+
+    @property
+    def is_swap(self) -> bool:
+        return isinstance(self.visual, SwapOptions)
 
 
 class VideoAnonymization:
@@ -50,104 +210,237 @@ class VideoAnonymization:
         self.face_anonymizer = face_anonymizer
         # Aligner is only needed for the model-based (face swap) path.
         self.face_aligner = face_aligner
-        # Voice anonymizer is optional; only needed when anonymize_voice=True.
+        # Voice anonymizer is optional; only needed when AudioOptions.anonymize_voice.
         self.voice_anonymizer = voice_anonymizer
 
-    def _resolve_face_aligner(self) -> FaceAligner:
-        # BlendSwap expects the FFHQ template at 256x256; FaceSwapper re-derives the
-        # crop from the original 5-point landmarks, so any valid alignment works.
-        if self.face_aligner is None:
-            self.face_aligner = FaceAligner(output_size=(256, 256), mode=AlignMode.FFHQ)
-        return self.face_aligner
-
-    @staticmethod
-    def _resolve_output_path(input_path: Path, output_path: Path | None) -> Path:
-        if output_path is not None:
-            return output_path
-        return Path("outputs") / f"anonymized_{input_path.stem}.mp4"
-
-    @staticmethod
-    def _resolve_output_fps(source_fps: float, target_fps: int | None) -> float:
-        if target_fps is None:
-            return float(source_fps)
-        if target_fps <= 0:
-            raise ValueError(f"target_fps must be > 0, got {target_fps}")
-        if target_fps >= source_fps:
-            return float(source_fps)
-        return float(target_fps)
-
-    @staticmethod
-    def _build_fresh_tracker(tracker: ByteTracker) -> ByteTracker:
-        # Tracking state should be clean for each video run.
-        return ByteTracker(
-            high_thresh=tracker.high_thresh,
-            low_thresh=tracker.low_thresh,
-            max_lost=tracker.max_lost,
-            min_hits=tracker.min_hits,
-            iou_thresh=tracker.iou_thresh,
-            iou_thresh_low=tracker.iou_thresh_low,
-            gate_mahal=tracker.gate_mahal,
-        )
-
-    @staticmethod
-    def _voice_label(voice_method: VoiceAnonymizationMethod | str) -> str:
-        if isinstance(voice_method, VoiceAnonymizationMethod):
-            return voice_method.value
-        return str(voice_method)
-
-    def _resolve_audio_source(
+    # --------------------------------------------------------------------- #
+    # Master: orchestrate context -> visual -> audio -> write.               #
+    # --------------------------------------------------------------------- #
+    def anonymize_video(
         self,
-        input_path: Path,
-        stack: contextlib.ExitStack,
+        input_path: str | Path,
+        output_path: str | Path | None = None,
         *,
-        keep_audio: bool,
-        anonymize_voice: bool,
-        voice_method: VoiceAnonymizationMethod | str,
+        visual: VisualOptions | SwapOptions | None = None,
+        audio: AudioOptions | None = None,
+        target_fps: int | None = None,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+        codec: str = "H264",
+        progress_every: int = 60,
+    ) -> VideoAnonymizationResult:
+        """Anonymize ``input_path`` and write the result to ``output_path``.
+
+        The image treatment is selected by the type of ``visual``:
+
+        * :class:`VisualOptions` -> no-model obfuscation (the default).
+        * :class:`SwapOptions`   -> model-based face swap (BlendSwap).
+
+        The audio treatment is selected by ``audio`` (:class:`AudioOptions`):
+        keep the original track, drop it, or run the :class:`VoiceAnonymizer`.
+        """
+        context = self._prepare_context(
+            input_path,
+            output_path,
+            visual=visual if visual is not None else VisualOptions(),
+            audio=audio if audio is not None else AudioOptions(),
+            target_fps=target_fps,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            codec=codec,
+            progress_every=progress_every,
+        )
+        self._log_header(context)
+
+        visual_frames = self._build_visual_pipeline(context)
+        with contextlib.ExitStack() as stack:
+            audio_source, audio_start = self._build_audio_pipeline(context, stack)
+            # Encoding stays inside the stack so a temp voice WAV outlives the write.
+            return self._write_result(
+                context, visual_frames, audio_source, audio_start
+            )
+
+    # --------------------------------------------------------------------- #
+    # Context preparation + logging.                                         #
+    # --------------------------------------------------------------------- #
+    def _prepare_context(
+        self,
+        input_path: str | Path,
+        output_path: str | Path | None,
+        *,
+        visual: VisualOptions | SwapOptions,
+        audio: AudioOptions,
+        target_fps: int | None,
         start_sec: float | None,
         end_sec: float | None,
-    ) -> tuple[str | None, float]:
-        """Resolve the ``(audio_source, audio_start_sec)`` passed to ``write_frames``.
+        codec: str,
+        progress_every: int,
+    ) -> _RunContext:
+        input_path = Path(input_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input video not found: {input_path}")
 
-        - ``keep_audio=False`` -> ``(None, 0.0)``: silent output.
-        - voice anonymization off -> ``(input_path, start)``: mux the original audio.
-        - voice anonymization on -> extract the ``[start, end]`` window, run the
-          :class:`VoiceAnonymizer`, write a temp WAV (cleaned up via ``stack``) and
-          return ``(wav, 0.0)`` since the extracted window is already trimmed.
+        is_swap = isinstance(visual, SwapOptions)
+        if is_swap:
+            # Fail fast on swap prerequisites before any frames are read.
+            if self.face_anonymizer.face_swapper is None:
+                raise RuntimeError(
+                    "SwapOptions requires a FaceAnonymizer configured with a "
+                    "FaceSwapper (face_anonymizer=FaceAnonymizer(face_swapper=...))."
+                )
+            if visual.smoothing_mode not in ("online", "offline"):
+                raise ValueError(
+                    f"smoothing must be 'online' or 'offline', got {visual.smoothing!r}"
+                )
+        else:
+            # Validate/coerce the obfuscation method up front (rejects SWAP).
+            visual.resolved_method
 
-        Falls back to silent output if voice anonymization is requested but the input
-        carries no audio stream.
-        """
-        if not keep_audio:
-            return None, 0.0
+        resolved_output = self._resolve_output_path(
+            input_path,
+            Path(output_path) if output_path is not None else None,
+            swap=is_swap,
+        )
+        source_meta = self.video_io.get_video_metadata(str(input_path))
+        output_fps = self._resolve_output_fps(source_meta.fps, target_fps)
 
-        start = float(start_sec) if start_sec else 0.0
-        if not anonymize_voice:
-            return str(input_path), start
+        return _RunContext(
+            input_path=input_path,
+            output_path=resolved_output,
+            source_meta=source_meta,
+            output_fps=output_fps,
+            target_fps=target_fps,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            codec=codec,
+            progress_every=progress_every,
+            visual=visual,
+            audio=audio,
+        )
 
-        if self.voice_anonymizer is None:
-            raise RuntimeError(
-                "anonymize_voice=True requires "
-                "VideoAnonymization(..., voice_anonymizer=VoiceAnonymizer(...))."
-            )
+    def _log_header(self, context: _RunContext) -> None:
+        meta = context.source_meta
+        print(f"Input: {context.input_path}")
+        print(
+            "Source metadata: "
+            f"{meta.width}x{meta.height}, "
+            f"{meta.fps:.3f} FPS, {meta.frame_count} frames"
+        )
+        print(f"Output: {context.output_path}")
 
-        if not self.video_io.has_audio(str(input_path)):
+        if isinstance(context.visual, SwapOptions):
+            print("Anonymization method: swap (BlendSwap)")
+            print(f"Output FPS: {context.output_fps:.3f}")
+            mode = context.visual.smoothing_mode if context.visual.stabilize else "off"
+            print(f"Temporal stabilization: {mode}")
+        else:
+            print(f"Anonymization method: {context.visual.resolved_method.value}")
+            print(f"Detect interval: {context.visual.resolved_detect_interval}")
+            print(f"Output FPS: {context.output_fps:.3f}")
+
+        print(f"Keep audio: {'on' if context.audio.keep_audio else 'off'}")
+        if context.audio.mode is AudioMode.ANONYMIZE:
             print(
-                "Warning: voice anonymization requested but the input has no audio "
-                "stream; the output will be silent."
+                "Voice anonymization: on "
+                f"({self._voice_label(context.audio.voice_method)})"
             )
-            return None, 0.0
 
-        waveform, sample_rate = self.video_io.extract_audio(
-            str(input_path), start_sec=start_sec, end_sec=end_sec
+    # --------------------------------------------------------------------- #
+    # Visual pipeline (image only).                                          #
+    # --------------------------------------------------------------------- #
+    def _build_visual_pipeline(self, context: _RunContext) -> Iterator[np.ndarray]:
+        if isinstance(context.visual, SwapOptions):
+            return self._process_visual_with_model(context, context.visual)
+        return self._process_visual_without_model(context, context.visual)
+
+    def _process_visual_without_model(
+        self,
+        context: _RunContext,
+        options: VisualOptions,
+    ) -> Iterator[np.ndarray]:
+        tracker = self._build_fresh_tracker(self.face_tracker)
+        source_frames = self.video_io.iter_frames(
+            str(context.input_path),
+            start_sec=context.start_sec,
+            end_sec=context.end_sec,
+            target_fps=context.target_fps,
         )
-        processed = self.voice_anonymizer.process(
-            waveform, sample_rate, method=voice_method
+        return self._iter_processed_frames(
+            frames=source_frames,
+            tracker=tracker,
+            method=options.resolved_method,
+            detect_interval=options.resolved_detect_interval,
+            blur_new=options.blur_new,
+            draw_tracks=options.draw_tracks,
+            progress_every=context.progress_every,
         )
-        work_dir = stack.enter_context(tempfile.TemporaryDirectory())
-        wav_path = Path(work_dir) / "voice_anonymized.wav"
-        self.video_io.write_audio(processed, sample_rate, str(wav_path))
-        # The extracted window is already trimmed, so no further audio seek is needed.
-        return str(wav_path), 0.0
+
+    def _process_visual_with_model(
+        self,
+        context: _RunContext,
+        options: SwapOptions,
+    ) -> Iterator[np.ndarray]:
+        aligner = self._resolve_face_aligner()
+        swapper = self.face_anonymizer.face_swapper
+        assert swapper is not None  # guaranteed by _prepare_context
+        output_smooth = options.resolved_output_smooth
+
+        # Prepare the source identity once up-front so any source issues surface early.
+        swapper.prepare_source()
+
+        def _make_source_frames() -> Iterator[np.ndarray]:
+            return self.video_io.iter_frames(
+                str(context.input_path),
+                start_sec=context.start_sec,
+                end_sec=context.end_sec,
+                target_fps=context.target_fps,
+            )
+
+        if options.stabilize and options.smoothing_mode == "offline":
+            offline = OfflineFaceSwapStabilizer(
+                detector=self.face_detector,
+                swapper=swapper,
+                output_smooth=output_smooth,
+                mask_smooth=options.mask_smooth,
+            )
+            print("Pass 1/2: detecting + tracking faces across the clip...")
+            pass1_count = 0
+            for frame_bgr in _make_source_frames():
+                offline.observe(frame_bgr)
+                pass1_count += 1
+                if (
+                    context.progress_every > 0
+                    and pass1_count % context.progress_every == 0
+                ):
+                    print(
+                        f"  pass 1: {pass1_count} frames "
+                        f"| faces: {offline.last_face_count}"
+                    )
+            offline.finalize()
+            print(f"Pass 1 done ({pass1_count} frames). Pass 2/2: swapping...")
+            return self._iter_offline_rendered_frames(
+                _make_source_frames(),
+                offline,
+                context.progress_every,
+            )
+
+        stabilizer: FaceSwapStabilizer | None = None
+        if options.stabilize:
+            stabilizer = FaceSwapStabilizer(
+                detector=self.face_detector,
+                swapper=swapper,
+                freq=context.output_fps,
+                min_cutoff=options.smooth_min_cutoff,
+                beta=options.smooth_beta,
+                output_smooth=output_smooth,
+                mask_smooth=options.mask_smooth,
+            )
+        return self._iter_swapped_frames(
+            frames=_make_source_frames(),
+            aligner=aligner,
+            progress_every=context.progress_every,
+            stabilizer=stabilizer,
+        )
 
     def _iter_processed_frames(
         self,
@@ -205,116 +498,6 @@ class VideoAnonymization:
 
             yield output_frame
 
-    def anonymize_video_without_model(
-        self,
-        input_path: str | Path,
-        output_path: str | Path | None = None,
-        *,
-        method: AnonymizationMethod | str = AnonymizationMethod.BLUR,
-        detect_interval: int = 1,
-        target_fps: int | None = None,
-        start_sec: float | None = None,
-        end_sec: float | None = None,
-        blur_new: bool = False,
-        draw_tracks: bool = False,
-        codec: str = "H264",
-        progress_every: int = 60,
-        keep_audio: bool = True,
-        anonymize_voice: bool = False,
-        voice_method: VoiceAnonymizationMethod | str = (
-            VoiceAnonymizationMethod.MCADAMS
-        ),
-    ) -> VideoAnonymizationResult:
-        input_path = Path(input_path)
-        output_path = self._resolve_output_path(
-            input_path,
-            Path(output_path) if output_path is not None else None,
-        )
-        detect_interval = max(int(detect_interval), 1)
-
-        if not input_path.exists():
-            raise FileNotFoundError(f"Input video not found: {input_path}")
-
-        method_value = method
-        if isinstance(method_value, str):
-            method_value = AnonymizationMethod(method_value.strip().lower())
-
-        source_meta = self.video_io.get_video_metadata(str(input_path))
-        output_fps = self._resolve_output_fps(source_meta.fps, target_fps)
-        tracker = self._build_fresh_tracker(self.face_tracker)
-
-        print(f"Input: {input_path}")
-        print(
-            "Source metadata: "
-            f"{source_meta.width}x{source_meta.height}, "
-            f"{source_meta.fps:.3f} FPS, {source_meta.frame_count} frames"
-        )
-        print(f"Output: {output_path}")
-        print(f"Anonymization method: {method_value.value}")
-        print(f"Detect interval: {detect_interval}")
-        print(f"Output FPS: {output_fps:.3f}")
-        print(f"Keep audio: {'on' if keep_audio else 'off'}")
-        if anonymize_voice and keep_audio:
-            print(f"Voice anonymization: on ({self._voice_label(voice_method)})")
-
-        source_frames = self.video_io.iter_frames(
-            str(input_path),
-            start_sec=start_sec,
-            end_sec=end_sec,
-            target_fps=target_fps,
-        )
-        processed_frames = self._iter_processed_frames(
-            frames=source_frames,
-            tracker=tracker,
-            method=method_value,
-            detect_interval=detect_interval,
-            blur_new=blur_new,
-            draw_tracks=draw_tracks,
-            progress_every=progress_every,
-        )
-
-        with contextlib.ExitStack() as stack:
-            audio_source, audio_start = self._resolve_audio_source(
-                input_path,
-                stack,
-                keep_audio=keep_audio,
-                anonymize_voice=anonymize_voice,
-                voice_method=voice_method,
-                start_sec=start_sec,
-                end_sec=end_sec,
-            )
-            t0 = time.perf_counter()
-            output_meta = self.video_io.write_frames(
-                frames=processed_frames,
-                output_path=str(output_path),
-                fps=output_fps,
-                codec=codec,
-                audio_source=audio_source,
-                audio_start_sec=audio_start,
-            )
-            elapsed = time.perf_counter() - t0
-        throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0
-
-        print("Done.")
-        print(
-            "Output metadata: "
-            f"{output_meta.width}x{output_meta.height}, "
-            f"{output_meta.fps:.3f} FPS, "
-            f"{output_meta.frame_count} frames, "
-            f"{output_meta.duration_sec:.2f} sec"
-        )
-        print(
-            f"Elapsed: {elapsed:.2f} sec "
-            f"| Pipeline throughput: {throughput_fps:.2f} FPS"
-        )
-
-        return VideoAnonymizationResult(
-            output_path=output_path,
-            output_metadata=output_meta,
-            elapsed_sec=elapsed,
-            throughput_fps=throughput_fps,
-        )
-
     def _iter_swapped_frames(
         self,
         frames: Iterator[np.ndarray],
@@ -341,7 +524,9 @@ class VideoAnonymization:
                     aligned_faces = aligner.align(detections)
                     # VideoIO yields BGR; BlendSwap operates in RGB.
                     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                    swapped_rgb = self.face_anonymizer.swap_face(frame_rgb, aligned_faces)
+                    swapped_rgb = self.face_anonymizer.swap_face(
+                        frame_rgb, aligned_faces
+                    )
                     output_frame = cv2.cvtColor(swapped_rgb, cv2.COLOR_RGB2BGR)
                 else:
                     output_frame = frame_bgr
@@ -376,156 +561,88 @@ class VideoAnonymization:
                 )
             yield output_frame
 
-    def anonymize_video_with_model(
+    # --------------------------------------------------------------------- #
+    # Audio pipeline (audio only).                                           #
+    # --------------------------------------------------------------------- #
+    def _build_audio_pipeline(
         self,
-        input_path: str | Path,
-        output_path: str | Path | None = None,
-        *,
-        target_fps: int | None = None,
-        start_sec: float | None = None,
-        end_sec: float | None = None,
-        codec: str = "H264",
-        progress_every: int = 60,
-        stabilize: bool = True,
-        smoothing: str = "online",
-        smooth_min_cutoff: float = 0.5,
-        smooth_beta: float = 0.05,
-        output_smooth: float | None = None,
-        mask_smooth: float = 0.5,
-        keep_audio: bool = True,
-        anonymize_voice: bool = False,
-        voice_method: VoiceAnonymizationMethod | str = (
-            VoiceAnonymizationMethod.MCADAMS
-        ),
-    ) -> VideoAnonymizationResult:
-        if self.face_anonymizer.face_swapper is None:
+        context: _RunContext,
+        stack: contextlib.ExitStack,
+    ) -> tuple[str | None, float]:
+        """Resolve the ``(audio_source, audio_start_sec)`` passed to ``write_frames``.
+
+        Branches purely on :attr:`AudioOptions.mode`:
+
+        * ``MUTE``      -> ``(None, 0.0)``: silent output.
+        * ``ORIGINAL``  -> ``(input_path, start)``: mux the source track untouched.
+        * ``ANONYMIZE`` -> extract the ``[start, end]`` window, run the
+          :class:`VoiceAnonymizer`, write a temp WAV (cleaned up via ``stack``).
+        """
+        mode = context.audio.mode
+        if mode is AudioMode.MUTE:
+            return None, 0.0
+        if mode is AudioMode.ORIGINAL:
+            return self._prepare_original_audio(context)
+        return self._prepare_anonymized_audio(context, stack)
+
+    def _prepare_original_audio(self, context: _RunContext) -> tuple[str, float]:
+        # Seek the muxed audio to match a trimmed (start_sec) render.
+        start = float(context.start_sec) if context.start_sec else 0.0
+        return str(context.input_path), start
+
+    def _prepare_anonymized_audio(
+        self,
+        context: _RunContext,
+        stack: contextlib.ExitStack,
+    ) -> tuple[str | None, float]:
+        if self.voice_anonymizer is None:
             raise RuntimeError(
-                "anonymize_video_with_model requires a FaceAnonymizer configured with "
-                "a FaceSwapper (face_anonymizer=FaceAnonymizer(face_swapper=...))."
+                "AudioOptions(anonymize_voice=True) requires "
+                "VideoAnonymization(..., voice_anonymizer=VoiceAnonymizer(...))."
             )
 
-        input_path = Path(input_path)
-        if output_path is not None:
-            output_path = Path(output_path)
-        else:
-            output_path = Path("outputs") / f"swapped_{input_path.stem}.mp4"
-
-        if not input_path.exists():
-            raise FileNotFoundError(f"Input video not found: {input_path}")
-
-        smoothing = smoothing.strip().lower()
-        if smoothing not in ("online", "offline"):
-            raise ValueError(
-                f"smoothing must be 'online' or 'offline', got {smoothing!r}"
+        if not self.video_io.has_audio(str(context.input_path)):
+            print(
+                "Warning: voice anonymization requested but the input has no audio "
+                "stream; the output will be silent."
             )
+            return None, 0.0
 
-        # Crop-EMA strength depends on the smoothing mode, so default it per mode when
-        # the caller leaves it unset. Online's causal 1-Euro leaves residual landmark
-        # jitter, so it leans on a stronger EMA (0.4) to damp the per-frame
-        # restore/color flicker. Offline's zero-phase landmarks are already steady, so it
-        # only needs a light EMA (0.25); a heavier one would reintroduce causal
-        # lip-ghosting in pass 2.
-        if output_smooth is None:
-            output_smooth = 0.25 if smoothing == "offline" else 0.4
-
-        aligner = self._resolve_face_aligner()
-        source_meta = self.video_io.get_video_metadata(str(input_path))
-        output_fps = self._resolve_output_fps(source_meta.fps, target_fps)
-
-        print(f"Input: {input_path}")
-        print(
-            "Source metadata: "
-            f"{source_meta.width}x{source_meta.height}, "
-            f"{source_meta.fps:.3f} FPS, {source_meta.frame_count} frames"
+        waveform, sample_rate = self.video_io.extract_audio(
+            str(context.input_path),
+            start_sec=context.start_sec,
+            end_sec=context.end_sec,
         )
-        print(f"Output: {output_path}")
-        print("Anonymization method: swap (BlendSwap)")
-        print(f"Output FPS: {output_fps:.3f}")
-        stabilize_mode = (smoothing if stabilize else "off")
-        print(f"Temporal stabilization: {stabilize_mode}")
-        print(f"Keep audio: {'on' if keep_audio else 'off'}")
-        if anonymize_voice and keep_audio:
-            print(f"Voice anonymization: on ({self._voice_label(voice_method)})")
+        processed = self.voice_anonymizer.process(
+            waveform, sample_rate, method=context.audio.voice_method
+        )
+        work_dir = stack.enter_context(tempfile.TemporaryDirectory())
+        wav_path = Path(work_dir) / "voice_anonymized.wav"
+        self.video_io.write_audio(processed, sample_rate, str(wav_path))
+        # The extracted window is already trimmed, so no further audio seek is needed.
+        return str(wav_path), 0.0
 
-        # Prepare the source identity once up-front so any source issues surface early.
-        self.face_anonymizer.face_swapper.prepare_source()
-
-        def _make_source_frames() -> Iterator[np.ndarray]:
-            return self.video_io.iter_frames(
-                str(input_path),
-                start_sec=start_sec,
-                end_sec=end_sec,
-                target_fps=target_fps,
-            )
-
-        if stabilize and smoothing == "offline":
-            offline = OfflineFaceSwapStabilizer(
-                detector=self.face_detector,
-                swapper=self.face_anonymizer.face_swapper,
-                # Zero-phase landmark smoothing already steadies the geometry, so the
-                # crop EMA only needs to be light (see per-mode default above): just
-                # enough to damp per-frame restore/color flicker without the causal
-                # lip-ghosting a heavy EMA would add in pass 2. The mask EMA stays on
-                # since the parser edge can still jitter frame-to-frame.
-                output_smooth=output_smooth,
-                mask_smooth=mask_smooth,
-            )
-            print("Pass 1/2: detecting + tracking faces across the clip...")
-            pass1_count = 0
-            for frame_bgr in _make_source_frames():
-                offline.observe(frame_bgr)
-                pass1_count += 1
-                if progress_every > 0 and pass1_count % progress_every == 0:
-                    print(
-                        f"  pass 1: {pass1_count} frames "
-                        f"| faces: {offline.last_face_count}"
-                    )
-            offline.finalize()
-            print(f"Pass 1 done ({pass1_count} frames). Pass 2/2: swapping...")
-            processed_frames = self._iter_offline_rendered_frames(
-                _make_source_frames(),
-                offline,
-                progress_every,
-            )
-        else:
-            stabilizer: FaceSwapStabilizer | None = None
-            if stabilize:
-                stabilizer = FaceSwapStabilizer(
-                    detector=self.face_detector,
-                    swapper=self.face_anonymizer.face_swapper,
-                    freq=output_fps,
-                    min_cutoff=smooth_min_cutoff,
-                    beta=smooth_beta,
-                    output_smooth=output_smooth,
-                    mask_smooth=mask_smooth,
-                )
-            processed_frames = self._iter_swapped_frames(
-                frames=_make_source_frames(),
-                aligner=aligner,
-                progress_every=progress_every,
-                stabilizer=stabilizer,
-            )
-
-        with contextlib.ExitStack() as stack:
-            audio_source, audio_start = self._resolve_audio_source(
-                input_path,
-                stack,
-                keep_audio=keep_audio,
-                anonymize_voice=anonymize_voice,
-                voice_method=voice_method,
-                start_sec=start_sec,
-                end_sec=end_sec,
-            )
-            t0 = time.perf_counter()
-            output_meta = self.video_io.write_frames(
-                frames=processed_frames,
-                output_path=str(output_path),
-                fps=output_fps,
-                codec=codec,
-                audio_source=audio_source,
-                audio_start_sec=audio_start,
-            )
-            elapsed = time.perf_counter() - t0
+    # --------------------------------------------------------------------- #
+    # Write + report.                                                        #
+    # --------------------------------------------------------------------- #
+    def _write_result(
+        self,
+        context: _RunContext,
+        frames: Iterator[np.ndarray],
+        audio_source: str | None,
+        audio_start_sec: float,
+    ) -> VideoAnonymizationResult:
+        # Frames are lazy, so the timer spans the actual visual processing too.
+        t0 = time.perf_counter()
+        output_meta = self.video_io.write_frames(
+            frames=frames,
+            output_path=str(context.output_path),
+            fps=context.output_fps,
+            codec=context.codec,
+            audio_source=audio_source,
+            audio_start_sec=audio_start_sec,
+        )
+        elapsed = time.perf_counter() - t0
         throughput_fps = output_meta.frame_count / elapsed if elapsed > 0 else 0.0
 
         print("Done.")
@@ -542,8 +659,59 @@ class VideoAnonymization:
         )
 
         return VideoAnonymizationResult(
-            output_path=output_path,
+            output_path=context.output_path,
             output_metadata=output_meta,
             elapsed_sec=elapsed,
             throughput_fps=throughput_fps,
         )
+
+    # --------------------------------------------------------------------- #
+    # Small shared helpers.                                                  #
+    # --------------------------------------------------------------------- #
+    def _resolve_face_aligner(self) -> FaceAligner:
+        # BlendSwap expects the FFHQ template at 256x256; FaceSwapper re-derives the
+        # crop from the original 5-point landmarks, so any valid alignment works.
+        if self.face_aligner is None:
+            self.face_aligner = FaceAligner(output_size=(256, 256), mode=AlignMode.FFHQ)
+        return self.face_aligner
+
+    @staticmethod
+    def _resolve_output_path(
+        input_path: Path,
+        output_path: Path | None,
+        *,
+        swap: bool,
+    ) -> Path:
+        if output_path is not None:
+            return output_path
+        prefix = "swapped" if swap else "anonymized"
+        return Path("outputs") / f"{prefix}_{input_path.stem}.mp4"
+
+    @staticmethod
+    def _resolve_output_fps(source_fps: float, target_fps: int | None) -> float:
+        if target_fps is None:
+            return float(source_fps)
+        if target_fps <= 0:
+            raise ValueError(f"target_fps must be > 0, got {target_fps}")
+        if target_fps >= source_fps:
+            return float(source_fps)
+        return float(target_fps)
+
+    @staticmethod
+    def _build_fresh_tracker(tracker: ByteTracker) -> ByteTracker:
+        # Tracking state should be clean for each video run.
+        return ByteTracker(
+            high_thresh=tracker.high_thresh,
+            low_thresh=tracker.low_thresh,
+            max_lost=tracker.max_lost,
+            min_hits=tracker.min_hits,
+            iou_thresh=tracker.iou_thresh,
+            iou_thresh_low=tracker.iou_thresh_low,
+            gate_mahal=tracker.gate_mahal,
+        )
+
+    @staticmethod
+    def _voice_label(voice_method: VoiceAnonymizationMethod | str) -> str:
+        if isinstance(voice_method, VoiceAnonymizationMethod):
+            return voice_method.value
+        return str(voice_method)

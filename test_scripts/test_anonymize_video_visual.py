@@ -9,7 +9,7 @@ from ai_core.face_anonymization.face_anonymizer import (
     AnonymizationMethod,
     FaceAnonymizer,
 )
-from ai_core.video_anonymization import VideoAnonymization
+from ai_core.video_anonymization import VideoAnonymization, VisualOptions
 from ai_core.face_detection.face_detector import FaceDetector
 from ai_core.face_tracking.face_tracker import ByteTracker
 from ai_core.video_io.video_io import VideoIO
@@ -18,7 +18,8 @@ from ai_core.video_io.video_io import VideoIO
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Offline pipeline using VideoAnonymization.anonymize_video_without_model"
+            "Offline pipeline using VideoAnonymization.anonymize_video "
+            "with VisualOptions (no-model obfuscation)"
         )
     )
     parser.add_argument(
@@ -188,16 +189,18 @@ def main() -> None:
         face_anonymizer=anonymizer,
     )
 
-    result = video_anonymization.anonymize_video_without_model(
+    result = video_anonymization.anonymize_video(
         input_path=input_path,
         output_path=args.output,
-        method=method,
-        detect_interval=args.detect_interval,
+        visual=VisualOptions(
+            method=method,
+            detect_interval=args.detect_interval,
+            blur_new=args.blur_new,
+            draw_tracks=args.draw_tracks,
+        ),
         target_fps=args.target_fps,
         start_sec=args.start_sec,
         end_sec=args.end_sec,
-        blur_new=args.blur_new,
-        draw_tracks=args.draw_tracks,
         codec=args.codec,
         progress_every=args.progress_every,
     )
