@@ -7,8 +7,8 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
-# Import models so SQLAlchemy registers tables before create_all runs.
-from app.models import user as _user_models  # noqa: F401
+# Import models so SQLAlchemy registers all tables before create_all runs.
+from app import models as _models  # noqa: F401
 from app.utils.exceptions import AppException, app_exception_handler
 
 
