@@ -9,8 +9,6 @@ from app.db.base import Base
 from app.db.session import engine
 # Import models so SQLAlchemy registers tables before create_all runs.
 from app.models import user as _user_models  # noqa: F401
-from app.services.face_swap_service import FaceSwapService
-from app.services.video_service import VideoPipelineService
 from app.utils.exceptions import AppException, app_exception_handler
 
 
@@ -18,17 +16,7 @@ from app.utils.exceptions import AppException, app_exception_handler
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    video_service = VideoPipelineService.create_from_settings(settings)
-    app.state.video_service = video_service
-    app.state.face_swap_service = FaceSwapService(
-        settings=settings,
-        video_service=video_service,
-    )
-    try:
-        yield
-    finally:
-        app.state.video_service = None
-        app.state.face_swap_service = None
+    yield
 
 
 def create_application() -> FastAPI:
