@@ -14,7 +14,7 @@ from app.services.video_service import VideoService
 from app.utils.exceptions import AppException
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_prefix}/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_prefix}/auth/token")
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

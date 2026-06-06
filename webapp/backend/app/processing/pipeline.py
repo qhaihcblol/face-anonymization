@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 # webapp/backend/app/processing/pipeline.py -> parents[4] is the repo root that holds
 # the ``ai_core`` package. It is not pip-installed, so make it importable on demand
@@ -34,15 +37,29 @@ class AnonymizationPipeline:
         *,
         retinaface_onnx_path: str | None = None,
         restore_blend: float = 0.8,
+        knnvc_reference_voice_path: str | None = None,
+        knnvc_encoder_onnx_path: str | None = None,
+        knnvc_vocoder_onnx_path: str | None = None,
+        knnvc_topk: int = 4,
     ) -> None:
         self._retinaface_onnx_path = retinaface_onnx_path
         self._restore_blend = restore_blend
+        self._knnvc_reference_voice_path = knnvc_reference_voice_path
+        self._knnvc_encoder_onnx_path = knnvc_encoder_onnx_path
+        self._knnvc_vocoder_onnx_path = knnvc_vocoder_onnx_path
+        self._knnvc_topk = knnvc_topk
         self._engine: Any | None = None
         self._lock = threading.Lock()
 
     @classmethod
     def from_settings(cls, settings: "Settings") -> "AnonymizationPipeline":
-        return cls(retinaface_onnx_path=settings.retinaface_onnx_path)
+        return cls(
+            retinaface_onnx_path=settings.retinaface_onnx_path,
+            knnvc_reference_voice_path=settings.knnvc_reference_voice_path,
+            knnvc_encoder_onnx_path=settings.knnvc_encoder_onnx_path,
+            knnvc_vocoder_onnx_path=settings.knnvc_vocoder_onnx_path,
+            knnvc_topk=settings.knnvc_topk,
+        )
 
     def process_file(
         self,
@@ -108,8 +125,45 @@ class AnonymizationPipeline:
             face_tracker=ByteTracker(),
             face_anonymizer=anonymizer,
             face_aligner=aligner,
-            voice_anonymizer=VoiceAnonymizer(),
+            voice_anonymizer=VoiceAnonymizer(voice_converter=self._build_voice_converter()),
         )
+
+    def _build_voice_converter(self) -> Any | None:
+        """Build the kNN-VC converter for the voice ``convert`` method.
+
+        Returns ``None`` (and logs a warning) if the converter cannot be built — e.g.
+        the exported ONNX models are missing — so the pipeline still serves every DSP
+        voice method; only ``convert`` becomes unavailable.
+        """
+        _ensure_ai_core_importable()
+        try:
+            from ai_core.voice_anonymization.voice_converter import VoiceConverter
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "kNN-VC import failed (%s); voice 'convert' disabled, DSP methods OK.",
+                exc,
+            )
+            return None
+
+        kwargs: dict[str, Any] = {"topk": self._knnvc_topk}
+        if self._knnvc_reference_voice_path:
+            kwargs["reference_voice_path"] = self._knnvc_reference_voice_path
+        if self._knnvc_encoder_onnx_path:
+            kwargs["encoder_onnx_path"] = self._knnvc_encoder_onnx_path
+        if self._knnvc_vocoder_onnx_path:
+            kwargs["vocoder_onnx_path"] = self._knnvc_vocoder_onnx_path
+
+        try:
+            converter = VoiceConverter(**kwargs)
+            logger.info("kNN-VC voice converter loaded.")
+            return converter
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "kNN-VC converter unavailable (%s); voice 'convert' disabled, "
+                "DSP methods OK.",
+                exc,
+            )
+            return None
 
     def _resolve_retinaface_path(self) -> str:
         if self._retinaface_onnx_path:

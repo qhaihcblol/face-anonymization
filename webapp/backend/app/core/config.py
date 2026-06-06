@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     # bundled inside the ai_core package when unset.
     retinaface_onnx_path: str | None = None
 
+    # kNN-VC voice conversion (the "convert" voice method). Paths default to the
+    # assets bundled in ai_core/voice_anonymization/ when unset; if the models are
+    # missing the pipeline falls back to DSP voice methods (convert disabled).
+    knnvc_reference_voice_path: str | None = None
+    knnvc_encoder_onnx_path: str | None = None
+    knnvc_vocoder_onnx_path: str | None = None
+    knnvc_topk: int = 4
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
