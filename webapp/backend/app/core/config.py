@@ -18,6 +18,23 @@ class Settings(BaseSettings):
     ]
     sql_echo: bool = False
 
+    # --- Object storage (Cloudflare R2, via the S3-compatible API) ---
+    r2_endpoint_url: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket: str | None = None
+    r2_region: str = "auto"
+    r2_presign_expiry_seconds: int = 3600
+
+    # --- Video upload constraints ---
+    video_max_upload_mb: int = 2048
+    video_allowed_extensions: list[str] = [".mp4", ".mov", ".webm", ".mkv", ".avi"]
+
+    # --- Anonymization pipeline (ai_core) ---
+    # Optional override for the RetinaFace detector weights; defaults to the model
+    # bundled inside the ai_core package when unset.
+    retinaface_onnx_path: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -35,6 +52,25 @@ class Settings(BaseSettings):
             if raw_value.startswith("["):
                 return value
             return [item.strip() for item in raw_value.split(",") if item.strip()]
+        return value
+
+    @field_validator("video_allowed_extensions", mode="before")
+    @classmethod
+    def parse_video_extensions(cls, value: str | list[str]) -> str | list[str]:
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+            if raw_value.startswith("["):
+                return value
+            return [item.strip() for item in raw_value.split(",") if item.strip()]
+        return value
+
+    @field_validator("video_max_upload_mb")
+    @classmethod
+    def validate_video_max_upload_mb(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("video_max_upload_mb must be > 0")
         return value
 
     @property
@@ -87,6 +123,29 @@ class Settings(BaseSettings):
                 connect_args["ssl"] = True
 
         return connect_args
+
+    @property
+    def r2_configured(self) -> bool:
+        return all(
+            (
+                self.r2_endpoint_url,
+                self.r2_access_key_id,
+                self.r2_secret_access_key,
+                self.r2_bucket,
+            )
+        )
+
+    @property
+    def resolved_video_allowed_extensions(self) -> set[str]:
+        return {
+            f".{ext.lower().lstrip('.')}"
+            for ext in self.video_allowed_extensions
+            if ext and ext.strip()
+        }
+
+    @property
+    def video_max_upload_bytes(self) -> int:
+        return int(self.video_max_upload_mb) * 1024 * 1024
 
 
 @lru_cache
