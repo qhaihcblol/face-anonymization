@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,17 +29,28 @@ async def lifespan(app: FastAPI):
 
     # Compose the dependencies here so the request layer only sees the VideoService
     # interface. The anonymization engine itself loads lazily on the first edit.
+    # One pipeline is shared by the offline edit worker and the live socket, so the
+    # ONNX models are loaded into memory only once.
     storage = R2Storage.from_settings(settings)
+    pipeline = AnonymizationPipeline.from_settings(settings)
     processor = LocalVideoProcessor(
         storage=storage,
-        pipeline=AnonymizationPipeline.from_settings(settings),
+        pipeline=pipeline,
         session_factory=AsyncSessionLocal,
     )
     app.state.video_service = VideoService(storage=storage, processor=processor)
+
+    # Live camera (real-time): share the pipeline and bound concurrent inferences so
+    # a burst of viewers cannot starve the event loop or the offline edit worker.
+    app.state.live_pipeline = pipeline
+    app.state.live_limiter = anyio.CapacityLimiter(settings.live_max_concurrent_frames)
+    app.state.live_jpeg_quality = settings.live_jpeg_quality
     try:
         yield
     finally:
         app.state.video_service = None
+        app.state.live_pipeline = None
+        app.state.live_limiter = None
 
 
 def create_application() -> FastAPI:

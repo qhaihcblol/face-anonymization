@@ -1,7 +1,7 @@
 from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     knnvc_encoder_onnx_path: str | None = None
     knnvc_vocoder_onnx_path: str | None = None
     knnvc_topk: int = 4
+
+    # --- Live camera (real-time WebSocket) ---
+    # JPEG quality (1-100) of the processed frames streamed back to the browser.
+    live_jpeg_quality: int = Field(default=80, ge=1, le=100)
+    # Run the detector every N frames; in-between frames reuse tracker predictions.
+    live_detect_interval: int = Field(default=2, ge=1, le=10)
+    # Cap concurrent (CPU-bound) frame inferences across all live sessions so a burst
+    # of viewers cannot starve the event loop / the offline edit worker.
+    live_max_concurrent_frames: int = Field(default=2, ge=1, le=32)
 
     model_config = SettingsConfigDict(
         env_file=".env",

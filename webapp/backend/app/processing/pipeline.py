@@ -61,6 +61,7 @@ class AnonymizationPipeline:
         knnvc_encoder_onnx_path: str | None = None,
         knnvc_vocoder_onnx_path: str | None = None,
         knnvc_topk: int = 4,
+        live_detect_interval: int = 2,
     ) -> None:
         self._retinaface_onnx_path = retinaface_onnx_path
         self._restore_blend = restore_blend
@@ -68,6 +69,7 @@ class AnonymizationPipeline:
         self._knnvc_encoder_onnx_path = knnvc_encoder_onnx_path
         self._knnvc_vocoder_onnx_path = knnvc_vocoder_onnx_path
         self._knnvc_topk = knnvc_topk
+        self._live_detect_interval = live_detect_interval
         self._engine: Any | None = None
         self._lock = threading.Lock()
 
@@ -79,6 +81,7 @@ class AnonymizationPipeline:
             knnvc_encoder_onnx_path=settings.knnvc_encoder_onnx_path,
             knnvc_vocoder_onnx_path=settings.knnvc_vocoder_onnx_path,
             knnvc_topk=settings.knnvc_topk,
+            live_detect_interval=settings.live_detect_interval,
         )
 
     def process_file(
@@ -98,6 +101,49 @@ class AnonymizationPipeline:
             target_fps=params.get("target_fps"),
             start_sec=params.get("start_sec"),
             end_sec=params.get("end_sec"),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Live camera (real-time, frame-by-frame)                             #
+    # ------------------------------------------------------------------ #
+    def create_live_session(self) -> Any:
+        """Build one real-time anonymizer for a single live connection.
+
+        Reuses the cached engine's already-loaded detector + anonymizer (so live
+        never loads a second copy of the ONNX models); only the lightweight tracker
+        is per-session. Blocking on first call — it triggers the lazy model load —
+        so call it from a worker thread.
+        """
+        engine = self._engine_or_build()
+        _ensure_ai_core_importable()
+        from ai_core.live_anonymization import LiveFaceAnonymizer, LiveVisualConfig
+
+        return LiveFaceAnonymizer(
+            face_detector=engine.face_detector,
+            face_tracker=engine.face_tracker,
+            face_anonymizer=engine.face_anonymizer,
+            config=LiveVisualConfig(detect_interval=self._live_detect_interval),
+        )
+
+    def build_live_config(self, payload: dict[str, Any]) -> Any:
+        """Translate a validated ``LiveConfigMessage`` dict into a ``LiveVisualConfig``.
+
+        ``payload`` comes from :class:`~app.schemas.live.LiveConfigMessage`, so every
+        key is present and range-checked; face swap is already excluded there.
+        """
+        _ensure_ai_core_importable()
+        from ai_core.face_anonymization.face_anonymizer import ObfuscationParams
+        from ai_core.live_anonymization import LiveVisualConfig
+
+        return LiveVisualConfig(
+            method=str(payload.get("visual_method", "none")).strip().lower(),
+            detect_interval=int(payload.get("detect_interval", self._live_detect_interval)),
+            draw_tracks=bool(payload.get("draw_boxes", False)),
+            obfuscation=ObfuscationParams(
+                blur_strength=int(payload.get("blur_strength", 31)),
+                pixelation_level=int(payload.get("pixelation_level", 16)),
+                mask_color=_hex_to_bgr(payload.get("mask_color", "#A0A0A0")),
+            ),
         )
 
     # ------------------------------------------------------------------ #
