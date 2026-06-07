@@ -6,6 +6,7 @@ import { AlertCircle, ChevronDown, FileVideo, Loader2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { DeleteVideoButton } from '@/components/faceguard/dashboard/history/delete-video-button'
 import { DownloadButton } from '@/components/faceguard/dashboard/history/download-button'
 import {
   VideoApiError,
@@ -25,7 +26,13 @@ import type { VideoEditPublic, VideoPublic } from '@/lib/videos/types'
  * One uploaded video and its protection runs. Edits are fetched lazily the first
  * time the card is expanded, so the History list stays one request on load.
  */
-export function HistoryVideoCard({ video }: { video: VideoPublic }) {
+export function HistoryVideoCard({
+  video,
+  onDeleted,
+}: {
+  video: VideoPublic
+  onDeleted: (videoId: number) => void
+}) {
   const [expanded, setExpanded] = useState(false)
   const [edits, setEdits] = useState<VideoEditPublic[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -85,11 +92,18 @@ export function HistoryVideoCard({ video }: { video: VideoPublic }) {
           </div>
         </button>
 
-        <DownloadButton
-          getUrl={() => getVideoDownloadUrl(video.id)}
-          filename={video.original_filename}
-          label="Download original video"
-        />
+        <div className="flex shrink-0 items-center gap-1">
+          <DownloadButton
+            getUrl={() => getVideoDownloadUrl(video.id)}
+            filename={video.original_filename}
+            label="Download original video"
+          />
+          <DeleteVideoButton
+            videoId={video.id}
+            videoName={video.original_filename}
+            onDeleted={onDeleted}
+          />
+        </div>
       </div>
 
       {expanded && (

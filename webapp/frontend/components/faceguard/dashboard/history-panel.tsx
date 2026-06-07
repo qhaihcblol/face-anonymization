@@ -48,6 +48,10 @@ export function HistoryPanel() {
     }
   }, [])
 
+  const handleDeleted = useCallback((videoId: number) => {
+    setVideos((current) => current.filter((video) => video.id !== videoId))
+  }, [])
+
   useEffect(() => {
     void load()
   }, [load])
@@ -113,7 +117,13 @@ export function HistoryPanel() {
           )}
 
           {loadState === 'ready' &&
-            videos.map((video) => <HistoryVideoCard key={video.id} video={video} />)}
+            videos.map((video) => (
+              <HistoryVideoCard
+                key={video.id}
+                video={video}
+                onDeleted={handleDeleted}
+              />
+            ))}
         </CardContent>
       </Card>
     </div>
