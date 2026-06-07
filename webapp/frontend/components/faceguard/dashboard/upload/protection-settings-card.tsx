@@ -1,6 +1,5 @@
 'use client'
 
-import type { ComponentProps } from 'react'
 import { AudioLines, Loader2, ScanFace, ShieldCheck, SlidersHorizontal, X } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -11,10 +10,11 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import {
+  ColorField,
+  NumberField,
   OptionSelect,
   SettingsSection,
 } from '@/components/faceguard/dashboard/upload/settings-section'
@@ -28,37 +28,6 @@ import {
 } from '@/lib/videos/options'
 
 type FormPatch = Partial<ProtectionForm>
-
-/** A labelled numeric input. Keeps the repetitive field markup in one place. */
-function NumberField({
-  id,
-  label,
-  value,
-  onChange,
-  hint,
-  ...inputProps
-}: {
-  id: string
-  label: string
-  value: string
-  onChange: (value: string) => void
-  hint?: string
-} & Pick<ComponentProps<'input'>, 'min' | 'max' | 'step' | 'placeholder' | 'inputMode'>) {
-  return (
-    <div className="space-y-2">
-      <Label htmlFor={id}>{label}</Label>
-      <Input
-        id={id}
-        type="number"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="border-cyan-300/35"
-        {...inputProps}
-      />
-      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
-    </div>
-  )
-}
 
 /** Middle card: configure face + voice protection and run it on the source video. */
 export function ProtectionSettingsCard({
@@ -129,24 +98,13 @@ export function ProtectionSettingsCard({
           )}
 
           {form.visualMethod === 'mask' && (
-            <div className="space-y-2">
-              <Label htmlFor="mask-color">Mask color</Label>
-              <div className="flex items-center gap-3">
-                <input
-                  id="mask-color"
-                  type="color"
-                  value={form.maskColor}
-                  onChange={(event) => onChange({ maskColor: event.target.value })}
-                  className="h-9 w-14 cursor-pointer rounded-md border border-cyan-300/35 bg-transparent p-1"
-                />
-                <span className="text-xs text-muted-foreground uppercase">
-                  {form.maskColor}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Solid fill drawn over the detected face region.
-              </p>
-            </div>
+            <ColorField
+              id="mask-color"
+              label="Mask color"
+              value={form.maskColor}
+              onChange={(maskColor) => onChange({ maskColor })}
+              hint="Solid fill drawn over the detected face region."
+            />
           )}
 
           {!isSwap && (

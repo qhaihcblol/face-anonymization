@@ -31,6 +31,58 @@ export const visualMethodOptions: SelectOption<VisualMethod>[] = [
   { value: 'none', label: 'None', description: 'Leave faces untouched — only audio / range settings run.' },
 ]
 
+// --- Live camera privacy filter -------------------------------------------- //
+
+/** The live preview offers the same face filters as Upload, minus face-swap
+ * (which needs a source identity and is offline-only). */
+export type LiveFilterMethod = Exclude<VisualMethod, 'swap'>
+
+export const liveFilterOptions: SelectOption<LiveFilterMethod>[] = [
+  { value: 'none', label: 'None', description: 'Pass the camera through untouched — no privacy filter applied.' },
+  { value: 'blur', label: 'Blur', description: 'Soften each detected face with a Gaussian blur.' },
+  { value: 'pixelate', label: 'Pixelate', description: 'Replace each face with coarse mosaic blocks.' },
+  { value: 'mask', label: 'Mask', description: 'Cover the precise face region with a solid colour.' },
+  { value: 'blackout', label: 'Blackout', description: 'Fill the detected face region with solid black.' },
+]
+
+/**
+ * Controlled state for the live-camera privacy filter. Mirrors the visual half of
+ * {@link ProtectionForm}: numeric knobs stay as input strings so the fields can be
+ * cleared while typing, and are parsed only when used.
+ */
+export type LiveFilterForm = {
+  method: LiveFilterMethod
+  blurStrength: string
+  pixelationLevel: string
+  maskColor: string
+}
+
+export const defaultLiveFilterForm: LiveFilterForm = {
+  method: 'none',
+  blurStrength: '31',
+  pixelationLevel: '16',
+  maskColor: '#A0A0A0',
+}
+
+/**
+ * Short label describing the configured filter, shown as an overlay badge on the
+ * live preview. Returns `null` when no filter is active so the caller can hide it.
+ */
+export function summarizeLiveFilter(form: LiveFilterForm): string | null {
+  switch (form.method) {
+    case 'none':
+      return null
+    case 'blur':
+      return `Blur · strength ${form.blurStrength || '—'}`
+    case 'pixelate':
+      return `Pixelate · level ${form.pixelationLevel || '—'}`
+    case 'mask':
+      return `Mask · ${form.maskColor.toUpperCase()}`
+    case 'blackout':
+      return 'Blackout'
+  }
+}
+
 // --- Audio (voice) --------------------------------------------------------- //
 
 /** A friendlier framing of the three backend audio states. */
