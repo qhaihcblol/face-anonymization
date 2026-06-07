@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 
 import { CameraControlsCard } from '@/components/faceguard/dashboard/live/camera-controls-card'
 import { CameraPreviewCard } from '@/components/faceguard/dashboard/live/camera-preview-card'
@@ -10,19 +10,36 @@ import {
   type LiveFilterForm,
 } from '@/lib/videos/options'
 import { useLiveCamera } from '@/lib/videos/use-live-camera'
+import { useLiveProcessing } from '@/lib/videos/use-live-processing'
 
 /**
  * Orchestrates the Live Camera workspace. Owns the privacy-filter form and the
- * preview overlay toggles, and delegates the camera device lifecycle to
- * {@link useLiveCamera}. The two cards stay purely presentational — mirroring the
- * Upload Video panel's structure.
+ * preview overlay toggles; delegates the camera device lifecycle to
+ * {@link useLiveCamera} and the real-time anonymization stream to
+ * {@link useLiveProcessing}. Protection runs only while streaming with a filter
+ * selected, so a raw preview never leaves the device. The two cards stay purely
+ * presentational — mirroring the Upload Video panel's structure.
  */
 export function LiveCameraWorkspace() {
   const camera = useLiveCamera()
+  const outputCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const [filter, setFilter] = useState<LiveFilterForm>(defaultLiveFilterForm)
   const [showBoundingBox, setShowBoundingBox] = useState(true)
   const [showConfidence, setShowConfidence] = useState(true)
+
+  // A filter of "none" is a pure local preview: keep the socket closed so nothing
+  // leaves the device until the user actually picks a protection filter.
+  const protectionEnabled = camera.isStreaming && filter.method !== 'none'
+
+  const processing = useLiveProcessing({
+    enabled: protectionEnabled,
+    sourceVideoRef: camera.videoRef,
+    outputCanvasRef,
+    filter,
+    showBoundingBox,
+    showConfidence,
+  })
 
   const filterSummary = useMemo(() => summarizeLiveFilter(filter), [filter])
 
@@ -30,18 +47,30 @@ export function LiveCameraWorkspace() {
     setFilter((previous) => ({ ...previous, ...patch }))
   }
 
+  // Surface the processed-stream numbers when protection is live, else the raw
+  // camera monitor's.
+  const isLive = processing.status === 'live'
+  const fps = isLive ? processing.stats.fps : camera.fps
+  const latencyMs = isLive
+    ? processing.stats.processMs !== null
+      ? Math.round(processing.stats.processMs)
+      : null
+    : camera.latencyMs
+
   return (
     <div className="grid gap-6 xl:grid-cols-[1.45fr_1fr]">
       <CameraPreviewCard
         videoRef={camera.videoRef}
+        outputCanvasRef={outputCanvasRef}
         isStreaming={camera.isStreaming}
         isRecording={camera.isRecording}
-        fps={camera.fps}
-        latencyMs={camera.latencyMs}
+        showProcessed={protectionEnabled && processing.hasFrame}
+        processingStatus={processing.status}
+        processingError={processing.error}
+        fps={fps}
+        latencyMs={latencyMs}
         statusMessage={camera.statusMessage}
         errorMessage={camera.errorMessage}
-        showBoundingBox={showBoundingBox}
-        showConfidence={showConfidence}
         filterSummary={filterSummary}
         onStartStream={() => void camera.startStream()}
         onStopStream={camera.stopStream}

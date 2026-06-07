@@ -1,8 +1,17 @@
 'use client'
 
 import type { RefObject } from 'react'
-import { Circle, Clapperboard, Monitor, RefreshCcw, ShieldCheck, Video } from 'lucide-react'
+import {
+  Circle,
+  Clapperboard,
+  Loader2,
+  Monitor,
+  RefreshCcw,
+  ShieldCheck,
+  Video,
+} from 'lucide-react'
 
+import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -12,18 +21,28 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import type { LiveProcessingStatus } from '@/lib/videos/use-live-processing'
 
-/** Left card: the live webcam preview, detection overlays and stream/record controls. */
+/**
+ * Left card: the camera preview and the stream/record controls.
+ *
+ * The raw local stream renders into the `<video>`; once protection is active the
+ * processed `<canvas>` (frame + detected-face overlay, drawn by
+ * {@link useLiveProcessing}) fades in over it. Nothing here runs detection — it only
+ * displays what the camera/processing hooks produce.
+ */
 export function CameraPreviewCard({
   videoRef,
+  outputCanvasRef,
   isStreaming,
   isRecording,
+  showProcessed,
+  processingStatus,
+  processingError,
   fps,
   latencyMs,
   statusMessage,
   errorMessage,
-  showBoundingBox,
-  showConfidence,
   filterSummary,
   onStartStream,
   onStopStream,
@@ -31,20 +50,25 @@ export function CameraPreviewCard({
   onStopRecording,
 }: {
   videoRef: RefObject<HTMLVideoElement | null>
+  outputCanvasRef: RefObject<HTMLCanvasElement | null>
   isStreaming: boolean
   isRecording: boolean
+  showProcessed: boolean
+  processingStatus: LiveProcessingStatus
+  processingError: string | null
   fps: number
   latencyMs: number | null
   statusMessage: string
   errorMessage: string | null
-  showBoundingBox: boolean
-  showConfidence: boolean
   filterSummary: string | null
   onStartStream: () => void
   onStopStream: () => void
   onStartRecording: () => void
   onStopRecording: () => void
 }) {
+  const isProtected = processingStatus === 'live' && showProcessed
+  const isConnecting = isStreaming && processingStatus === 'connecting'
+
   return (
     <Card className="border-cyan-300/30 bg-background/75 backdrop-blur-sm">
       <CardHeader>
@@ -56,8 +80,14 @@ export function CameraPreviewCard({
             </CardDescription>
           </div>
           <div className="flex items-center gap-2">
-            <Badge className="bg-cyan-500/20 text-cyan-700 dark:text-cyan-100">
-              {isStreaming ? 'Live' : 'Offline'}
+            <Badge
+              className={
+                isProtected
+                  ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-200'
+                  : 'bg-cyan-500/20 text-cyan-700 dark:text-cyan-100'
+              }
+            >
+              {isProtected ? 'Protected' : isStreaming ? 'Live' : 'Offline'}
             </Badge>
             <Badge className="bg-cyan-500/15 text-cyan-700 dark:text-cyan-100">
               FPS {fps}
@@ -76,7 +106,14 @@ export function CameraPreviewCard({
             autoPlay
             muted
             playsInline
-            className="h-full w-full object-contain"
+            className="absolute inset-0 h-full w-full object-contain"
+          />
+          <canvas
+            ref={outputCanvasRef}
+            className={cn(
+              'pointer-events-none absolute inset-0 h-full w-full object-contain transition-opacity duration-200',
+              showProcessed ? 'opacity-100' : 'opacity-0',
+            )}
           />
 
           {!isStreaming && (
@@ -88,16 +125,11 @@ export function CameraPreviewCard({
             </div>
           )}
 
-          {showBoundingBox && isStreaming && (
-            <>
-              <div className="pointer-events-none absolute top-[18%] left-[18%] h-24 w-20 rounded-md border-2 border-cyan-300/90 shadow-[0_0_20px_-6px_rgba(34,211,238,0.95)]" />
-              <div className="pointer-events-none absolute top-[34%] right-[24%] h-28 w-24 rounded-md border-2 border-cyan-300/90 shadow-[0_0_20px_-6px_rgba(34,211,238,0.95)]" />
-              {showConfidence && (
-                <p className="pointer-events-none absolute right-3 bottom-3 rounded-md border border-cyan-300/35 bg-slate-950/70 px-2 py-1 text-xs text-cyan-100">
-                  Face confidence: 98.1%
-                </p>
-              )}
-            </>
+          {isConnecting && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-950/55 text-cyan-100">
+              <Loader2 className="size-8 animate-spin text-cyan-300/90" />
+              <p className="text-sm text-cyan-100/90">Connecting to protection…</p>
+            </div>
           )}
 
           {isStreaming && filterSummary && (
@@ -155,6 +187,7 @@ export function CameraPreviewCard({
         <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-4 py-2 text-sm text-muted-foreground">
           <p className="font-medium text-foreground">Status: {statusMessage}</p>
           {errorMessage && <p className="mt-1 text-rose-300">{errorMessage}</p>}
+          {processingError && <p className="mt-1 text-rose-300">{processingError}</p>}
         </div>
       </CardContent>
     </Card>
