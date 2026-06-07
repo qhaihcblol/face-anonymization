@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -25,6 +26,40 @@ class AnonymizationMethod(Enum):
     SWAP = "swap"
 
 
+@dataclass(slots=True)
+class ObfuscationParams:
+    """Tunable knobs for the no-model obfuscation methods (blur / pixelate / mask).
+
+    Pulled out of :class:`FaceAnonymizer` so a single (heavyweight) anonymizer can be
+    reused across many videos while each run picks its own strengths via
+    ``FaceAnonymizer.anonymize(..., params=...)`` — no need to rebuild the instance
+    (and reload the parser/aligner) per edit. Values are normalized on construction so
+    callers can pass raw UI input without pre-validating it.
+    """
+
+    blur_strength: int = 31
+    pixelation_level: int = 16
+    mask_color: tuple[int, int, int] = (160, 160, 160)
+    # Hardening so blur/pixelate cannot be recovered (quantize + unstored noise).
+    irreversible: bool = True
+    noise_strength: float = 12.0
+    quantization_levels: int = 8
+    # Soft-edge width (px std-dev) for the ellipse fallback mask.
+    mask_feather: float = 4.0
+
+    def __post_init__(self) -> None:
+        blur = max(int(self.blur_strength), 3)
+        if blur % 2 == 0:
+            blur += 1  # cv2.GaussianBlur requires an odd kernel size
+        self.blur_strength = blur
+        self.pixelation_level = max(int(self.pixelation_level), 4)
+        self.mask_color = tuple(int(np.clip(c, 0, 255)) for c in self.mask_color)
+        self.irreversible = bool(self.irreversible)
+        self.noise_strength = max(float(self.noise_strength), 0.0)
+        self.quantization_levels = max(int(self.quantization_levels), 0)
+        self.mask_feather = max(float(self.mask_feather), 0.0)
+
+
 class FaceAnonymizer:
     def __init__(
         self,
@@ -39,12 +74,17 @@ class FaceAnonymizer:
         quantization_levels: int = 8,
         mask_feather: float = 4.0,
     ) -> None:
-        self.blur_strength = max(int(blur_strength), 3)
-        if self.blur_strength % 2 == 0:
-            self.blur_strength += 1
-
-        self.pixelation_level = max(int(pixelation_level), 4)
-        self.mask_color = tuple(int(np.clip(c, 0, 255)) for c in mask_color)
+        # Default obfuscation knobs for this instance. ``anonymize(..., params=...)``
+        # overrides them per call, so one anonymizer can serve many videos/edits.
+        self.params = ObfuscationParams(
+            blur_strength=blur_strength,
+            pixelation_level=pixelation_level,
+            mask_color=mask_color,
+            irreversible=irreversible,
+            noise_strength=noise_strength,
+            quantization_levels=quantization_levels,
+            mask_feather=mask_feather,
+        )
         self.face_swapper = face_swapper
 
         # Optional precise face-region masking: a BiSeNet parser run on an aligned
@@ -52,13 +92,7 @@ class FaceAnonymizer:
         # Requires an aligner to produce the crop and warp the mask back to frame.
         self.face_parser = face_parser
         self.face_aligner = face_aligner
-        # Soft-edge width (px std-dev) for the ellipse fallback mask.
-        self.mask_feather = max(float(mask_feather), 0.0)
 
-        # Hardening for blur/pixelate so the obfuscated region cannot be recovered.
-        self.irreversible = bool(irreversible)
-        self.noise_strength = max(float(noise_strength), 0.0)
-        self.quantization_levels = max(int(quantization_levels), 0)
         # Unseeded RNG on purpose: the noise must not be reproducible, otherwise it
         # could be subtracted back out.
         self._rng = np.random.default_rng()
@@ -111,6 +145,7 @@ class FaceAnonymizer:
         self,
         bbox: tuple[int, int, int, int],
         shape: tuple[int, int],
+        params: ObfuscationParams,
     ) -> np.ndarray:
         """Soft elliptical mask (float32 [0, 1]) for one bbox — the coarse fallback."""
         x1, y1, x2, y2 = bbox
@@ -120,8 +155,8 @@ class FaceAnonymizer:
         axis_x = max((x2 - x1) // 2, 1)
         axis_y = max(int((y2 - y1) * 0.58), 1)
         cv2.ellipse(mask, (cx, cy), (axis_x, axis_y), 0, 0, 360, 1.0, -1)
-        if self.mask_feather > 0.0:
-            mask = cv2.GaussianBlur(mask, (0, 0), self.mask_feather)
+        if params.mask_feather > 0.0:
+            mask = cv2.GaussianBlur(mask, (0, 0), params.mask_feather)
         return mask
 
     def _parser_face_mask(
@@ -179,6 +214,7 @@ class FaceAnonymizer:
         self,
         image: np.ndarray,
         detections: list[dict[str, Any]],
+        params: ObfuscationParams,
     ) -> np.ndarray:
         """Combined soft face mask (float32 [0, 1]) over all detections.
 
@@ -199,7 +235,7 @@ class FaceAnonymizer:
             if landmarks is not None:
                 face_mask = self._parser_face_mask(image, landmarks, bbox, shape)
             if face_mask is None:
-                face_mask = self._ellipse_face_mask(bbox, shape)
+                face_mask = self._ellipse_face_mask(bbox, shape, params)
             mask = np.maximum(mask, face_mask)
         return mask
 
@@ -216,7 +252,9 @@ class FaceAnonymizer:
         ) * alpha
         return np.clip(blended, 0, 255).astype(np.uint8)
 
-    def _destroy(self, region: np.ndarray) -> np.ndarray:
+    def _destroy(
+        self, region: np.ndarray, params: ObfuscationParams
+    ) -> np.ndarray:
         """Make an obfuscated region non-recoverable.
 
         Quantization is a lossy, non-linear step that discards the fine gradient
@@ -225,33 +263,46 @@ class FaceAnonymizer:
         inverse problem ill-posed. Together they stop blur/pixelation from being
         decoded back to the original face.
         """
-        if not self.irreversible:
+        if not params.irreversible:
             return region
 
         out = region.astype(np.float32)
-        if self.quantization_levels > 0:
-            step = 256.0 / self.quantization_levels
+        if params.quantization_levels > 0:
+            step = 256.0 / params.quantization_levels
             out = np.floor(out / step) * step + step / 2.0
-        if self.noise_strength > 0.0:
-            out = out + self._rng.normal(0.0, self.noise_strength, size=out.shape)
+        if params.noise_strength > 0.0:
+            out = out + self._rng.normal(0.0, params.noise_strength, size=out.shape)
         return np.clip(out, 0, 255).astype(np.uint8)
 
-    def _none(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
+    def _none(
+        self,
+        image: np.ndarray,
+        detections: list[dict[str, Any]],
+        params: ObfuscationParams,
+    ) -> np.ndarray:
         return image
 
-    def _blur(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
-        mask = self._region_mask(image, detections)
+    def _blur(
+        self,
+        image: np.ndarray,
+        detections: list[dict[str, Any]],
+        params: ObfuscationParams,
+    ) -> np.ndarray:
+        mask = self._region_mask(image, detections, params)
         if not np.any(mask):
             return image
 
-        blurred = cv2.GaussianBlur(image, (self.blur_strength, self.blur_strength), 0)
-        blurred = self._destroy(blurred)
+        blurred = cv2.GaussianBlur(image, (params.blur_strength, params.blur_strength), 0)
+        blurred = self._destroy(blurred, params)
         return self._composite(image, blurred, mask)
 
     def _pixelate(
-        self, image: np.ndarray, detections: list[dict[str, Any]]
+        self,
+        image: np.ndarray,
+        detections: list[dict[str, Any]],
+        params: ObfuscationParams,
     ) -> np.ndarray:
-        mask = self._region_mask(image, detections)
+        mask = self._region_mask(image, detections, params)
         if not np.any(mask):
             return image
 
@@ -264,7 +315,7 @@ class FaceAnonymizer:
             if h < 2 or w < 2:
                 continue
 
-            scale = max(min(h, w) // self.pixelation_level, 1)
+            scale = max(min(h, w) // params.pixelation_level, 1)
             small_w = max(w // scale, 1)
             small_h = max(h // scale, 1)
 
@@ -273,24 +324,32 @@ class FaceAnonymizer:
             )
             # Degrade the low-res block averages (the part that still leaks identity)
             # before upscaling, so the mosaic cannot be reconstructed.
-            small = self._destroy(small)
+            small = self._destroy(small, params)
             blocks = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
             pixelated[y1:y2, x1:x2] = blocks
         return self._composite(image, pixelated, mask)
 
-    def _mask(self, image: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
-        mask = self._region_mask(image, detections)
+    def _mask(
+        self,
+        image: np.ndarray,
+        detections: list[dict[str, Any]],
+        params: ObfuscationParams,
+    ) -> np.ndarray:
+        mask = self._region_mask(image, detections, params)
         if not np.any(mask):
             return image
 
         solid = np.empty_like(image)
-        solid[:] = self.mask_color
+        solid[:] = params.mask_color
         return self._composite(image, solid, mask)
 
     def _blackout(
-        self, image: np.ndarray, detections: list[dict[str, Any]]
+        self,
+        image: np.ndarray,
+        detections: list[dict[str, Any]],
+        params: ObfuscationParams,
     ) -> np.ndarray:
-        mask = self._region_mask(image, detections)
+        mask = self._region_mask(image, detections, params)
         if not np.any(mask):
             return image
 
@@ -324,7 +383,14 @@ class FaceAnonymizer:
         image: np.ndarray,
         detections: list[dict[str, Any]],
         method: AnonymizationMethod | str,
+        params: ObfuscationParams | None = None,
     ) -> np.ndarray:
+        """Obfuscate every detected face in ``image`` with ``method``.
+
+        ``params`` overrides this instance's default :class:`ObfuscationParams` for
+        this call only (so one anonymizer can serve many videos with different
+        strengths); pass ``None`` to use the instance defaults.
+        """
         if not isinstance(image, np.ndarray):
             raise TypeError("image must be numpy.ndarray")
         if image.ndim != 3 or image.shape[2] != 3:
@@ -343,6 +409,7 @@ class FaceAnonymizer:
                 "Call FaceAnonymizer.swap_face(image, aligned_faces) instead."
             )
 
+        resolved = params if params is not None else self.params
         method_map = {
             AnonymizationMethod.NONE: self._none,
             AnonymizationMethod.BLUR: self._blur,
@@ -350,4 +417,4 @@ class FaceAnonymizer:
             AnonymizationMethod.MASK: self._mask,
             AnonymizationMethod.BLACKOUT: self._blackout,
         }
-        return method_map[method_value](image, detections)
+        return method_map[method_value](image, detections, resolved)

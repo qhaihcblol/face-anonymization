@@ -23,6 +23,26 @@ def _ensure_ai_core_importable() -> None:
         sys.path.insert(0, root)
 
 
+def _hex_to_bgr(
+    value: Any, default: tuple[int, int, int] = (160, 160, 160)
+) -> tuple[int, int, int]:
+    """Convert a ``#RRGGBB`` hex colour to an OpenCV ``(B, G, R)`` tuple.
+
+    ai_core fills BGR video frames with this tuple, so the RGB the user picked is
+    reordered here. Falls back to neutral grey if the value is missing or malformed.
+    """
+    text = str(value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return default
+    try:
+        r = int(text[0:2], 16)
+        g = int(text[2:4], 16)
+        b = int(text[4:6], 16)
+    except ValueError:
+        return default
+    return (b, g, r)
+
+
 class AnonymizationPipeline:
     """Thin wrapper around ai_core's ``VideoAnonymization``.
 
@@ -75,6 +95,7 @@ class AnonymizationPipeline:
             output_path=output_path,
             visual=visual,
             audio=audio,
+            target_fps=params.get("target_fps"),
             start_sec=params.get("start_sec"),
             end_sec=params.get("end_sec"),
         )
@@ -183,18 +204,45 @@ class AnonymizationPipeline:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _build_options(params: dict[str, Any]) -> tuple[Any, Any]:
+        """Translate the persisted edit ``params`` into ai_core option objects.
+
+        ``params`` is the JSON-serialized :class:`VideoEditCreate`, so every key is
+        present with a validated value; ``.get(..., default)`` is belt-and-braces for
+        rows created before a field existed.
+        """
         _ensure_ai_core_importable()
         from ai_core.video_anonymization import (
             AudioOptions,
+            ObfuscationParams,
             SwapOptions,
             VisualOptions,
+            VoiceParams,
         )
 
         method = str(params.get("visual_method", "blur")).strip().lower()
-        visual = SwapOptions() if method == "swap" else VisualOptions(method=method)
+        if method == "swap":
+            # Face swap has its own (model) option object; the obfuscation knobs and
+            # the box overlay do not apply to it.
+            visual: Any = SwapOptions()
+        else:
+            visual = VisualOptions(
+                method=method,
+                draw_tracks=bool(params.get("draw_boxes", False)),
+                obfuscation=ObfuscationParams(
+                    blur_strength=int(params.get("blur_strength", 31)),
+                    pixelation_level=int(params.get("pixelation_level", 16)),
+                    mask_color=_hex_to_bgr(params.get("mask_color", "#A0A0A0")),
+                ),
+            )
+
         audio = AudioOptions(
             keep_audio=bool(params.get("keep_audio", True)),
             anonymize_voice=bool(params.get("anonymize_voice", False)),
             voice_method=str(params.get("voice_method", "mcadams")),
+            voice=VoiceParams(
+                mcadams_alpha=float(params.get("mcadams_alpha", 0.8)),
+                pitch_steps=float(params.get("pitch_steps", -4.0)),
+                formant_shift=float(params.get("formant_shift", 1.2)),
+            ),
         )
         return visual, audio

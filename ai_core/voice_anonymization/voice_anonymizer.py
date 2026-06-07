@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -9,7 +10,7 @@ import numpy as np
 if TYPE_CHECKING:
     from ai_core.voice_anonymization.voice_converter import VoiceConverter
 
-__all__ = ["VoiceAnonymizationMethod", "VoiceAnonymizer"]
+__all__ = ["VoiceAnonymizationMethod", "VoiceAnonymizer", "VoiceParams"]
 
 
 class VoiceAnonymizationMethod(Enum):
@@ -19,6 +20,40 @@ class VoiceAnonymizationMethod(Enum):
     FORMANT = "formant"
     PITCH_FORMANT = "pitch_formant"
     CONVERT = "convert"  # model-based (ONNX voice conversion)
+
+
+@dataclass(slots=True)
+class VoiceParams:
+    """Tunable knobs for the DSP voice methods (mcadams / pitch / formant).
+
+    The audio counterpart to :class:`~ai_core.face_anonymization.face_anonymizer.ObfuscationParams`:
+    pulled out of :class:`VoiceAnonymizer` so one anonymizer can serve many runs
+    while each picks its own strengths via ``VoiceAnonymizer.process(..., params=...)``.
+    Values are normalized/validated on construction (CONVERT ignores these — it is
+    driven entirely by the configured ``VoiceConverter``).
+    """
+
+    mcadams_alpha: float = 0.8
+    pitch_steps: float = -4.0
+    formant_shift: float = 1.2
+    # 0 -> auto (sr // 1000 + 2), resolved per call since it depends on the rate.
+    lpc_order: int = 0
+    n_fft: int = 1024
+    hop_length: int = 256
+    lifter: int = 30
+
+    def __post_init__(self) -> None:
+        self.mcadams_alpha = float(self.mcadams_alpha)
+        if self.mcadams_alpha <= 0.0:
+            raise ValueError(f"mcadams_alpha must be > 0, got {self.mcadams_alpha}")
+        self.pitch_steps = float(self.pitch_steps)
+        self.formant_shift = float(self.formant_shift)
+        if self.formant_shift <= 0.0:
+            raise ValueError(f"formant_shift must be > 0, got {self.formant_shift}")
+        self.lpc_order = int(self.lpc_order)
+        self.n_fft = max(int(self.n_fft), 32)
+        self.hop_length = max(int(self.hop_length), 1)
+        self.lifter = max(int(self.lifter), 1)
 
 
 class VoiceAnonymizer:
@@ -35,21 +70,17 @@ class VoiceAnonymizer:
         lifter: int = 30,
         voice_converter: "VoiceConverter | None" = None,
     ) -> None:
-        self.mcadams_alpha = float(mcadams_alpha)
-        if self.mcadams_alpha <= 0.0:
-            raise ValueError(f"mcadams_alpha must be > 0, got {mcadams_alpha}")
-        # 0 -> auto (sr // 1000 + 2), resolved per call since it depends on the rate.
-        self.lpc_order = int(lpc_order)
-
-        self.pitch_steps = float(pitch_steps)
-
-        self.formant_shift = float(formant_shift)
-        if self.formant_shift <= 0.0:
-            raise ValueError(f"formant_shift must be > 0, got {formant_shift}")
-
-        self.n_fft = max(int(n_fft), 32)
-        self.hop_length = max(int(hop_length), 1)
-        self.lifter = max(int(lifter), 1)
+        # Default DSP knobs for this instance. ``process(..., params=...)`` overrides
+        # them per call, so one anonymizer can serve many runs/edits.
+        self.params = VoiceParams(
+            mcadams_alpha=mcadams_alpha,
+            pitch_steps=pitch_steps,
+            formant_shift=formant_shift,
+            lpc_order=lpc_order,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            lifter=lifter,
+        )
 
         # The model backend (optional); only required for the CONVERT method.
         self.voice_converter = voice_converter
@@ -82,6 +113,7 @@ class VoiceAnonymizer:
         waveform: np.ndarray,
         sample_rate: int,
         method: VoiceAnonymizationMethod | str = VoiceAnonymizationMethod.MCADAMS,
+        params: VoiceParams | None = None,
     ) -> np.ndarray:
         """Anonymize ``waveform`` and return it with the same shape, rate and length.
 
@@ -91,6 +123,8 @@ class VoiceAnonymizer:
             sample_rate: Sample rate of ``waveform`` in Hz.
             method: Which transform to apply. DSP methods run per channel; ``CONVERT``
                 delegates to the configured :class:`VoiceConverter`.
+            params: Overrides this instance's default :class:`VoiceParams` for this
+                call only; ``None`` uses the instance defaults. Ignored by ``CONVERT``.
 
         Returns:
             The processed waveform, same dtype/shape/length as the input.
@@ -100,6 +134,7 @@ class VoiceAnonymizer:
             RuntimeError: If ``CONVERT`` is requested without a ``VoiceConverter``.
         """
         method_value = self._coerce_method(method)
+        resolved = params if params is not None else self.params
 
         if not isinstance(sample_rate, (int, float)) or sample_rate <= 0:
             raise ValueError(f"sample_rate must be > 0, got {sample_rate}")
@@ -127,7 +162,10 @@ class VoiceAnonymizer:
         else:
             channels = [
                 self._anonymize_channel(
-                    np.ascontiguousarray(audio_2d[:, c]), method_value, sample_rate
+                    np.ascontiguousarray(audio_2d[:, c]),
+                    method_value,
+                    sample_rate,
+                    resolved,
                 )
                 for c in range(audio_2d.shape[1])
             ]
@@ -143,28 +181,35 @@ class VoiceAnonymizer:
         y: np.ndarray,
         method: VoiceAnonymizationMethod,
         sample_rate: int,
+        params: VoiceParams,
     ) -> np.ndarray:
         if method is VoiceAnonymizationMethod.MCADAMS:
-            return self._mcadams_shift(y, sample_rate)
+            return self._mcadams_shift(y, sample_rate, params)
         if method is VoiceAnonymizationMethod.PITCH:
-            return self._pitch_shift(y, sample_rate)
+            return self._pitch_shift(y, sample_rate, params)
         if method is VoiceAnonymizationMethod.FORMANT:
-            return self._formant_shift(y, sample_rate)
+            return self._formant_shift(y, sample_rate, params)
         if method is VoiceAnonymizationMethod.PITCH_FORMANT:
             # Formant first (on the original pitch), then pitch — pitch_shift resamples
             # internally, so doing it last keeps the warped envelope intact.
-            return self._pitch_shift(self._formant_shift(y, sample_rate), sample_rate)
+            return self._pitch_shift(
+                self._formant_shift(y, sample_rate, params), sample_rate, params
+            )
         raise ValueError(f"Unsupported DSP method: {method}")
 
-    def _pitch_shift(self, y: np.ndarray, sample_rate: int) -> np.ndarray:
-        if self.pitch_steps == 0.0:
+    def _pitch_shift(
+        self, y: np.ndarray, sample_rate: int, params: VoiceParams
+    ) -> np.ndarray:
+        if params.pitch_steps == 0.0:
             return y
         shifted = self._librosa.effects.pitch_shift(
-            y, sr=sample_rate, n_steps=self.pitch_steps
+            y, sr=sample_rate, n_steps=params.pitch_steps
         )
         return np.asarray(shifted, dtype=np.float32)
 
-    def _formant_shift(self, y: np.ndarray, sample_rate: int) -> np.ndarray:
+    def _formant_shift(
+        self, y: np.ndarray, sample_rate: int, params: VoiceParams
+    ) -> np.ndarray:
         """Shift the spectral envelope (formants) without moving the pitch.
 
         Separates each STFT frame into a smooth spectral envelope (cepstral
@@ -174,11 +219,11 @@ class VoiceAnonymizer:
         recombined. ``formant_shift`` > 1 raises formants (smaller-sounding vocal
         tract), < 1 lowers them.
         """
-        if self.formant_shift == 1.0 or y.size == 0:
+        if params.formant_shift == 1.0 or y.size == 0:
             return y
 
         librosa = self._librosa
-        spec = librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length)
+        spec = librosa.stft(y, n_fft=params.n_fft, hop_length=params.hop_length)
         mag = np.abs(spec)
         phase = np.angle(spec)
         eps = 1e-8
@@ -190,7 +235,7 @@ class VoiceAnonymizer:
         # recover the smooth envelope (drops the harmonic ripple = excitation).
         cepstrum = np.fft.irfft(log_mag, n=2 * (num_bins - 1), axis=0)
         lifter_win = np.zeros(cepstrum.shape[0], dtype=np.float32)
-        keep = min(self.lifter, cepstrum.shape[0] // 2)
+        keep = min(params.lifter, cepstrum.shape[0] // 2)
         lifter_win[:keep] = 1.0
         if keep > 1:
             lifter_win[-(keep - 1):] = 1.0  # symmetric low-quefrency window
@@ -200,18 +245,20 @@ class VoiceAnonymizer:
 
         # Warp the envelope: new_env[f] = env[f / formant_shift].
         bins = np.arange(num_bins, dtype=np.float32)
-        source_bins = bins / self.formant_shift
+        source_bins = bins / params.formant_shift
         warped = np.empty_like(envelope)
         for frame in range(envelope.shape[1]):
             warped[:, frame] = np.interp(source_bins, bins, envelope[:, frame])
 
         new_spec = (warped * excitation) * np.exp(1j * phase)
         out = librosa.istft(
-            new_spec, hop_length=self.hop_length, length=int(y.shape[0])
+            new_spec, hop_length=params.hop_length, length=int(y.shape[0])
         )
         return np.asarray(out, dtype=np.float32)
 
-    def _mcadams_shift(self, y: np.ndarray, sample_rate: int) -> np.ndarray:
+    def _mcadams_shift(
+        self, y: np.ndarray, sample_rate: int, params: VoiceParams
+    ) -> np.ndarray:
         """McAdams-coefficient transform: warp formants, keep pitch and duration.
 
         The VoicePrivacy DSP baseline. Per windowed frame:
@@ -226,14 +273,14 @@ class VoiceAnonymizer:
         Pitch and length are untouched (lip-safe), and the pole-angle warp is lossy /
         non-linear, so the result is not cheaply invertible.
         """
-        alpha = self.mcadams_alpha
+        alpha = params.mcadams_alpha
         if alpha == 1.0 or y.size == 0:
             return y
 
         from scipy.signal import lfilter
 
         librosa = self._librosa
-        order = self.lpc_order if self.lpc_order > 0 else int(sample_rate / 1000) + 2
+        order = params.lpc_order if params.lpc_order > 0 else int(sample_rate / 1000) + 2
         win_len = int(0.020 * sample_rate)  # 20 ms analysis frame
         if win_len < order + 1 or y.shape[0] <= win_len:
             return y  # too short to model — leave it untouched

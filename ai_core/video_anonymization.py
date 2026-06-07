@@ -33,6 +33,7 @@ from ai_core.face_alignment.face_aligner import AlignMode, FaceAligner
 from ai_core.face_anonymization.face_anonymizer import (
     AnonymizationMethod,
     FaceAnonymizer,
+    ObfuscationParams,
 )
 from ai_core.face_swapping.face_swap_offline import OfflineFaceSwapStabilizer
 from ai_core.face_swapping.face_swap_stabilizer import FaceSwapStabilizer
@@ -42,15 +43,18 @@ from ai_core.video_io.video_io import VideoIO, VideoMetadata
 from ai_core.voice_anonymization.voice_anonymizer import (
     VoiceAnonymizationMethod,
     VoiceAnonymizer,
+    VoiceParams,
 )
 
 __all__ = [
     "AudioMode",
     "AudioOptions",
+    "ObfuscationParams",
     "SwapOptions",
     "VideoAnonymization",
     "VideoAnonymizationResult",
     "VisualOptions",
+    "VoiceParams",
 ]
 
 
@@ -73,6 +77,9 @@ class VisualOptions:
     blur_new: bool = False
     # Overlay tracker boxes/ids on the output (debug visualization).
     draw_tracks: bool = False
+    # Per-run obfuscation strengths (blur kernel / pixelation / mask color / hardening).
+    # None -> use the FaceAnonymizer instance's own configured defaults.
+    obfuscation: ObfuscationParams | None = None
 
     @property
     def resolved_method(self) -> AnonymizationMethod:
@@ -155,6 +162,9 @@ class AudioOptions:
     keep_audio: bool = True
     anonymize_voice: bool = False
     voice_method: VoiceAnonymizationMethod | str = VoiceAnonymizationMethod.MCADAMS
+    # Per-run DSP strengths (mcadams alpha / pitch steps / formant shift / stft).
+    # None -> use the VoiceAnonymizer instance's own configured defaults.
+    voice: VoiceParams | None = None
 
     @property
     def mode(self) -> AudioMode:
@@ -373,6 +383,7 @@ class VideoAnonymization:
             blur_new=options.blur_new,
             draw_tracks=options.draw_tracks,
             progress_every=context.progress_every,
+            obfuscation=options.obfuscation,
         )
 
     def _process_visual_with_model(
@@ -451,6 +462,7 @@ class VideoAnonymization:
         blur_new: bool,
         draw_tracks: bool,
         progress_every: int,
+        obfuscation: ObfuscationParams | None = None,
     ) -> Iterator[np.ndarray]:
         frame_idx = 0
         last_detect_ms = 0.0
@@ -477,6 +489,7 @@ class VideoAnonymization:
                 frame_bgr,
                 tracks_for_anonymize,
                 method=method,
+                params=obfuscation,
             )
 
             if draw_tracks:
@@ -614,7 +627,10 @@ class VideoAnonymization:
             end_sec=context.end_sec,
         )
         processed = self.voice_anonymizer.process(
-            waveform, sample_rate, method=context.audio.voice_method
+            waveform,
+            sample_rate,
+            method=context.audio.voice_method,
+            params=context.audio.voice,
         )
         work_dir = stack.enter_context(tempfile.TemporaryDirectory())
         wav_path = Path(work_dir) / "voice_anonymized.wav"
