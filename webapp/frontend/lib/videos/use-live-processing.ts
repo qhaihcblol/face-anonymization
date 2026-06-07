@@ -36,6 +36,14 @@ const TICKET_ENDPOINT = '/api/live/ticket'
 const DEFAULT_TARGET_FPS = 15
 const DEFAULT_SEND_MAX_WIDTH = 640
 const DEFAULT_JPEG_QUALITY = 0.7
+// How many frames may be "in flight" (sent, awaiting their response) at once.
+// 1 = strict request/response: throughput collapses to 1000/round-trip, so on a
+// high-latency link (tunnel/port-forward ~400ms) it caps at ~2-3 FPS even though
+// the server renders in ~42ms. Allowing a few overlapping frames hides that latency
+// (throughput -> min(targetFps, depth*1000/RTT, server rate)) at the cost of the
+// preview lagging real time by ~depth*RTT. The server still renders serially in
+// order, so binary/JSON pairs stay correctly interleaved.
+const DEFAULT_MAX_IN_FLIGHT = 4
 
 const EMPTY_STATS: LiveProcessingStats = {
   fps: 0,
@@ -54,6 +62,7 @@ type Params = {
   targetFps?: number
   sendMaxWidth?: number
   jpegQuality?: number
+  maxInFlight?: number
 }
 
 export type LiveProcessing = {
@@ -133,6 +142,7 @@ export function useLiveProcessing({
   targetFps = DEFAULT_TARGET_FPS,
   sendMaxWidth = DEFAULT_SEND_MAX_WIDTH,
   jpegQuality = DEFAULT_JPEG_QUALITY,
+  maxInFlight = DEFAULT_MAX_IN_FLIGHT,
 }: Params): LiveProcessing {
   const [status, setStatus] = useState<LiveProcessingStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -141,7 +151,9 @@ export function useLiveProcessing({
 
   // Imperative state kept off the render path.
   const socketRef = useRef<WebSocket | null>(null)
-  const inFlightRef = useRef(false)
+  // Number of frames sent but not yet answered (frame / frame_error). Gates the
+  // pump so at most `maxInFlight` overlap — this is the depth that hides link latency.
+  const inFlightRef = useRef(0)
   const pendingFrameRef = useRef<Blob | null>(null)
   const rafRef = useRef<number | null>(null)
   const lastSentRef = useRef(0)
@@ -151,15 +163,15 @@ export function useLiveProcessing({
 
   // Latest values read by long-lived handlers without re-subscribing.
   const overlayRef = useRef({ box: showBoundingBox, confidence: showConfidence })
-  const optsRef = useRef({ targetFps, sendMaxWidth, jpegQuality })
+  const optsRef = useRef({ targetFps, sendMaxWidth, jpegQuality, maxInFlight })
 
   useEffect(() => {
     overlayRef.current = { box: showBoundingBox, confidence: showConfidence }
   }, [showBoundingBox, showConfidence])
 
   useEffect(() => {
-    optsRef.current = { targetFps, sendMaxWidth, jpegQuality }
-  }, [targetFps, sendMaxWidth, jpegQuality])
+    optsRef.current = { targetFps, sendMaxWidth, jpegQuality, maxInFlight }
+  }, [targetFps, sendMaxWidth, jpegQuality, maxInFlight])
 
   // Push filter changes to the live socket without reconnecting.
   useEffect(() => {
@@ -184,17 +196,19 @@ export function useLiveProcessing({
     setHasFrame(false)
     setStats(EMPTY_STATS)
     framesRef.current = 0
-    inFlightRef.current = false
+    inFlightRef.current = 0
     pendingFrameRef.current = null
     lastMetaRef.current = null
 
     const pump = (now: number) => {
       rafRef.current = requestAnimationFrame(pump)
 
+      const { targetFps: fps, sendMaxWidth: maxWidth, jpegQuality: quality, maxInFlight: depth } =
+        optsRef.current
       const socket = socketRef.current
       const video = sourceVideoRef.current
       if (
-        inFlightRef.current ||
+        inFlightRef.current >= depth ||
         !socket ||
         socket.readyState !== WebSocket.OPEN ||
         !video ||
@@ -204,8 +218,6 @@ export function useLiveProcessing({
         return
       }
 
-      const { targetFps: fps, sendMaxWidth: maxWidth, jpegQuality: quality } =
-        optsRef.current
       if (now - lastSentRef.current < 1000 / fps) {
         return
       }
@@ -230,14 +242,14 @@ export function useLiveProcessing({
       captureCtx.drawImage(video, 0, 0, width, height)
 
       lastSentRef.current = now
-      inFlightRef.current = true
+      inFlightRef.current += 1 // reserve a slot; released on send-failure or response
       capture.toBlob(
         (blob) => {
           const active = socketRef.current
           if (blob && active && active.readyState === WebSocket.OPEN) {
             active.send(blob)
           } else {
-            inFlightRef.current = false
+            inFlightRef.current = Math.max(0, inFlightRef.current - 1)
           }
         },
         'image/jpeg',
@@ -273,10 +285,10 @@ export function useLiveProcessing({
           }
           break
         case 'frame_error':
-          inFlightRef.current = false
+          inFlightRef.current = Math.max(0, inFlightRef.current - 1)
           break
         case 'frame': {
-          inFlightRef.current = false
+          inFlightRef.current = Math.max(0, inFlightRef.current - 1)
           framesRef.current += 1
           lastMetaRef.current = message
           if (!disposed) {
@@ -378,7 +390,7 @@ export function useLiveProcessing({
           socket.close()
         }
       }
-      inFlightRef.current = false
+      inFlightRef.current = 0
       pendingFrameRef.current = null
       setStatus('idle')
       setHasFrame(false)
