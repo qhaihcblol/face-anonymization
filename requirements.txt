@@ -1,15 +1,18 @@
-onnxruntime-gpu
+# AI core / inference
+onnxruntime-gpu        # CPU-only: thay bằng `onnxruntime`
 scipy
 librosa
 opencv-python
 
+# Backend (FastAPI)
 fastapi[standard]
-
 sqlalchemy
 alembic
 asyncpg
 bcrypt
-"python-jose[cryptography]"
-pytest pytest-asyncio
+python-jose[cryptography]
 boto3
 
+# Test (tùy chọn, có thể bỏ khi deploy)
+pytest
+pytest-asyncio
