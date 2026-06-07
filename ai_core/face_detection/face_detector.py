@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
+
+from ai_core.onnx_runtime import import_onnxruntime
 
 __all__ = ["FaceLandmarks", "FaceDetection", "FaceDetector"]
 
@@ -338,12 +339,7 @@ class FaceDetector:
 
     @staticmethod
     def _import_onnxruntime() -> Any:
-        try:
-            return cast(Any, importlib.import_module("onnxruntime"))
-        except ImportError as exc:
-            raise ImportError(
-                "onnxruntime is required. Install `onnxruntime` or `onnxruntime-gpu`."
-            ) from exc
+        return import_onnxruntime()
 
     def _create_session(
         self,

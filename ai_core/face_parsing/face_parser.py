@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
+
+from ai_core.onnx_runtime import import_onnxruntime
 
 __all__ = [
     "FaceParser",
@@ -162,12 +163,7 @@ class FaceParser:
 
     @staticmethod
     def _import_onnxruntime() -> Any:
-        try:
-            return cast(Any, importlib.import_module("onnxruntime"))
-        except ImportError as exc:
-            raise ImportError(
-                "onnxruntime is required. Install `onnxruntime` or `onnxruntime-gpu`."
-            ) from exc
+        return import_onnxruntime()
 
     @staticmethod
     def _resolve_model_path(model_path: str | Path | None) -> Path:

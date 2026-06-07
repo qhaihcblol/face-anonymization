@@ -116,7 +116,10 @@ async def _apply_config(
         await websocket.send_json({"type": "error", "detail": "Invalid filter config."})
         return
 
-    session.configure(pipeline.build_live_config(message.model_dump()))
+    # mode="json" serializes the LiveVisualMethod enum to its value ("blur"); the
+    # default python mode keeps the member, and build_live_config's str() coercion
+    # would then turn it into "livevisualmethod.blur" and reject it.
+    session.configure(pipeline.build_live_config(message.model_dump(mode="json")))
     await websocket.send_json({"type": "config_ack"})
 
 

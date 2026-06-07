@@ -7,6 +7,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from ai_core.onnx_runtime import import_onnxruntime
+
 __all__ = [
     "DEFAULT_ENCODER_ONNX",
     "DEFAULT_VOCODER_ONNX",
@@ -80,7 +82,7 @@ class VoiceConverter:
         self.topk = int(topk)
         self.reference_voice_path = Path(reference_voice_path)
 
-        self._ort = importlib.import_module("onnxruntime")
+        self._ort = import_onnxruntime()
         self.encoder = self._create_session(
             self.encoder_onnx_path, providers, intra_op_num_threads
         )
