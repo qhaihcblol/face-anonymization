@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   FileVideo,
   FolderUp,
-  Loader2,
   ScanFace,
   ShieldCheck,
   SlidersHorizontal,
@@ -31,38 +30,19 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import {
-  anonymizeVideo,
-  faceSwapVideo,
-  uploadVideo,
-  VideoApiError,
-} from '@/lib/video/client'
-import type {
-  AnonymizeMethod,
-  AnonymizeRequest,
-  VoiceMethod,
-  VoiceParams,
-} from '@/lib/video/types'
 
-type FilterPreset = AnonymizeMethod | 'swap'
+// UI-only shell: the backend video API integration was removed, so the form
+// controls below are purely presentational local state and "Activate Guard"
+// does not process anything.
+type FilterPreset = 'none' | 'blur' | 'pixelate' | 'mask' | 'blackout' | 'swap'
 
-type ProcessingStatus = 'uploading' | 'processing' | null
-
-type LastRun = {
-  filter: FilterPreset
-  voiceMethod: VoiceMethod
-  targetFps: number
-  startSec?: number
-  endSec?: number
-  drawTracks: boolean
-  elapsedSec: number
-}
-
-type ProcessingParams = {
-  targetFps: number
-  startSec?: number
-  endSec?: number
-}
+type VoiceMethod =
+  | 'none'
+  | 'mcadams'
+  | 'pitch'
+  | 'formant'
+  | 'pitch_formant'
+  | 'convert'
 
 const filterOptions: Array<{ value: FilterPreset; label: string }> = [
   { value: 'none', label: 'None' },
@@ -82,14 +62,6 @@ const voiceOptions: Array<{ value: VoiceMethod; label: string }> = [
   { value: 'convert', label: 'Voice conversion (AI)' },
 ]
 
-function getFilterLabel(value: FilterPreset): string {
-  return filterOptions.find((option) => option.value === value)?.label ?? value
-}
-
-function getVoiceLabel(value: VoiceMethod): string {
-  return voiceOptions.find((option) => option.value === value)?.label ?? value
-}
-
 function usesPitch(method: VoiceMethod): boolean {
   return method === 'pitch' || method === 'pitch_formant'
 }
@@ -98,51 +70,9 @@ function usesFormant(method: VoiceMethod): boolean {
   return method === 'formant' || method === 'pitch_formant'
 }
 
-function parseNumberInput(value: string, fieldName: string): number {
-  const parsed = Number(value.trim())
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`${fieldName} must be a number.`)
-  }
-
-  return parsed
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const normalized = hex.replace('#', '')
-  return [
-    parseInt(normalized.slice(0, 2), 16),
-    parseInt(normalized.slice(2, 4), 16),
-    parseInt(normalized.slice(4, 6), 16),
-  ]
-}
-
-function parseOptionalSecond(value: string, fieldName: string): number | undefined {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) {
-    return undefined
-  }
-
-  const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`${fieldName} must be a number >= 0.`)
-  }
-
-  return parsed
-}
-
-function parseTargetFps(value: string): number {
-  const parsed = Number(value)
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error('Target FPS must be an integer greater than 0.')
-  }
-
-  return parsed
-}
-
 export function UploadVideoPanel() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(null)
-  const [resultVideoUrl, setResultVideoUrl] = useState<string | null>(null)
   const [filter, setFilter] = useState<FilterPreset>('blur')
   const [targetFpsInput, setTargetFpsInput] = useState('30')
   const [startSecInput, setStartSecInput] = useState('')
@@ -155,19 +85,8 @@ export function UploadVideoPanel() {
   const [pitchStepsInput, setPitchStepsInput] = useState('-4')
   const [formantShiftInput, setFormantShiftInput] = useState('1.2')
   const [mcadamsAlphaInput, setMcadamsAlphaInput] = useState('0.8')
-  const [isProcessing, setIsProcessing] = useState(false)
-  const [processingStatus, setProcessingStatus] = useState<ProcessingStatus>(null)
-  const [processingProgress, setProcessingProgress] = useState(0)
-  const [formError, setFormError] = useState<string | null>(null)
-  const [lastRun, setLastRun] = useState<LastRun | null>(null)
 
   const previewUrlRef = useRef<string | null>(null)
-  const progressIntervalRef = useRef<number | null>(null)
-  // The uploaded video is reused across runs so changing only the filter does not
-  // re-upload the file; reset whenever a new file is selected.
-  const uploadedVideoIdRef = useRef<string | null>(null)
-  // Cache-buster: the backend overwrites the same output path on every run.
-  const runCounterRef = useRef(0)
 
   const isFaceSwap = filter === 'swap'
 
@@ -181,34 +100,9 @@ export function UploadVideoPanel() {
 
   const queueProgress = selectedFile ? 100 : 0
 
-  const stopProgressAnimation = () => {
-    if (progressIntervalRef.current !== null) {
-      window.clearInterval(progressIntervalRef.current)
-      progressIntervalRef.current = null
-    }
-  }
-
-  const startProgressAnimation = () => {
-    stopProgressAnimation()
-    // Processing is a single blocking request, so animate toward 92% and let the
-    // completion handler snap to 100% when the backend responds.
-    progressIntervalRef.current = window.setInterval(() => {
-      setProcessingProgress((current) => Math.min(92, current + 4))
-    }, 240)
-  }
-
   const handleUploadChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null
     setSelectedFile(nextFile)
-
-    stopProgressAnimation()
-    uploadedVideoIdRef.current = null
-    setIsProcessing(false)
-    setProcessingStatus(null)
-    setProcessingProgress(0)
-    setResultVideoUrl(null)
-    setLastRun(null)
-    setFormError(null)
 
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current)
@@ -225,139 +119,8 @@ export function UploadVideoPanel() {
     setOriginalVideoUrl(nextPreviewUrl)
   }
 
-  const buildProcessingParams = (): ProcessingParams => {
-    const targetFps = parseTargetFps(targetFpsInput)
-    const startSec = parseOptionalSecond(startSecInput, 'Start sec')
-    const endSec = parseOptionalSecond(endSecInput, 'End sec')
-
-    if (startSec !== undefined && endSec !== undefined && endSec <= startSec) {
-      throw new Error('End sec must be greater than Start sec.')
-    }
-
-    return { targetFps, startSec, endSec }
-  }
-
-  const buildVoiceParams = (): VoiceParams => {
-    const payload: VoiceParams = { voice_method: voiceMethod }
-
-    if (usesPitch(voiceMethod)) {
-      payload.pitch_steps = parseNumberInput(pitchStepsInput, 'Pitch shift')
-    }
-    if (usesFormant(voiceMethod)) {
-      payload.formant_shift = parseNumberInput(formantShiftInput, 'Formant shift')
-    }
-    if (voiceMethod === 'mcadams') {
-      payload.mcadams_alpha = parseNumberInput(mcadamsAlphaInput, 'Warp strength')
-    }
-
-    return payload
-  }
-
-  // Appearance controls for the bbox-based filters (not Face Swap). Each method has at
-  // most one knob, so only the relevant field is parsed and sent.
-  const buildFilterParams = (): Partial<AnonymizeRequest> => {
-    if (filter === 'blur') {
-      return { blur_strength: parseNumberInput(blurStrengthInput, 'Blur strength') }
-    }
-    if (filter === 'pixelate') {
-      return {
-        pixelation_level: parseNumberInput(pixelationLevelInput, 'Pixelation level'),
-      }
-    }
-    if (filter === 'mask') {
-      return { mask_color: hexToRgb(maskColor) }
-    }
-    return {}
-  }
-
-  const activateGuard = async () => {
-    if (!selectedFile || isProcessing) {
-      return
-    }
-
-    let params: ProcessingParams
-    let voiceParams: VoiceParams
-    let filterParams: Partial<AnonymizeRequest>
-    try {
-      params = buildProcessingParams()
-      voiceParams = buildVoiceParams()
-      filterParams = buildFilterParams()
-    } catch (error) {
-      setFormError(
-        error instanceof Error ? error.message : 'Invalid processing parameters.',
-      )
-      return
-    }
-
-    setFormError(null)
-    setResultVideoUrl(null)
-    setIsProcessing(true)
-    setProcessingProgress(6)
-    startProgressAnimation()
-
-    try {
-      setProcessingStatus('uploading')
-      let videoId = uploadedVideoIdRef.current
-      if (!videoId) {
-        const uploaded = await uploadVideo(selectedFile)
-        videoId = uploaded.video_id
-        uploadedVideoIdRef.current = videoId
-      }
-
-      setProcessingStatus('processing')
-      const result = isFaceSwap
-        ? await faceSwapVideo(videoId, {
-            target_fps: params.targetFps,
-            start_sec: params.startSec,
-            end_sec: params.endSec,
-            // Temporal stabilization is always on for the best swap quality.
-            stabilize: true,
-            ...voiceParams,
-          })
-        : await anonymizeVideo(videoId, {
-            method: filter,
-            target_fps: params.targetFps,
-            start_sec: params.startSec,
-            end_sec: params.endSec,
-            draw_tracks: showBoundingBox,
-            ...filterParams,
-            ...voiceParams,
-          })
-
-      runCounterRef.current += 1
-      // The backend overwrites the same output file each run, so cache-bust the URL.
-      const separator = result.output_video_url.includes('?') ? '&' : '?'
-      const bustedUrl = `${result.output_video_url}${separator}v=${runCounterRef.current}`
-      const elapsedSec = result.elapsed_sec
-      stopProgressAnimation()
-      setProcessingProgress(100)
-      setResultVideoUrl(bustedUrl)
-      setLastRun({
-        filter,
-        voiceMethod,
-        targetFps: params.targetFps,
-        startSec: params.startSec,
-        endSec: params.endSec,
-        drawTracks: showBoundingBox,
-        elapsedSec,
-      })
-    } catch (error) {
-      stopProgressAnimation()
-      setProcessingProgress(0)
-      setFormError(
-        error instanceof VideoApiError
-          ? error.message
-          : 'Processing failed. Please try again.',
-      )
-    } finally {
-      setProcessingStatus(null)
-      setIsProcessing(false)
-    }
-  }
-
   useEffect(() => {
     return () => {
-      stopProgressAnimation()
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current)
       }
@@ -456,10 +219,7 @@ export function UploadVideoPanel() {
               <Label htmlFor="filter-select">Privacy Filter</Label>
               <Select
                 value={filter}
-                onValueChange={(value) => {
-                  setFilter(value as FilterPreset)
-                  setFormError(null)
-                }}
+                onValueChange={(value) => setFilter(value as FilterPreset)}
               >
                 <SelectTrigger id="filter-select" className="w-full border-cyan-300/35">
                   <SelectValue placeholder="Select filter" />
@@ -490,10 +250,7 @@ export function UploadVideoPanel() {
                   step={2}
                   inputMode="numeric"
                   value={blurStrengthInput}
-                  onChange={(event) => {
-                    setBlurStrengthInput(event.target.value)
-                    setFormError(null)
-                  }}
+                  onChange={(event) => setBlurStrengthInput(event.target.value)}
                   className="border-cyan-300/35"
                 />
                 <p className="text-xs text-muted-foreground">
@@ -513,10 +270,7 @@ export function UploadVideoPanel() {
                   step={1}
                   inputMode="numeric"
                   value={pixelationLevelInput}
-                  onChange={(event) => {
-                    setPixelationLevelInput(event.target.value)
-                    setFormError(null)
-                  }}
+                  onChange={(event) => setPixelationLevelInput(event.target.value)}
                   className="border-cyan-300/35"
                 />
                 <p className="text-xs text-muted-foreground">
@@ -533,10 +287,7 @@ export function UploadVideoPanel() {
                     id="mask-color"
                     type="color"
                     value={maskColor}
-                    onChange={(event) => {
-                      setMaskColor(event.target.value)
-                      setFormError(null)
-                    }}
+                    onChange={(event) => setMaskColor(event.target.value)}
                     className="h-9 w-14 cursor-pointer rounded-md border border-cyan-300/35 bg-transparent p-1"
                   />
                   <span className="text-xs text-muted-foreground uppercase">
@@ -569,10 +320,7 @@ export function UploadVideoPanel() {
                 <Switch
                   id="show-bounding-box"
                   checked={showBoundingBox}
-                  onCheckedChange={(checked) => {
-                    setShowBoundingBox(checked)
-                    setFormError(null)
-                  }}
+                  onCheckedChange={setShowBoundingBox}
                 />
               </div>
             )}
@@ -591,10 +339,7 @@ export function UploadVideoPanel() {
               <Label htmlFor="voice-select">Voice Method</Label>
               <Select
                 value={voiceMethod}
-                onValueChange={(value) => {
-                  setVoiceMethod(value as VoiceMethod)
-                  setFormError(null)
-                }}
+                onValueChange={(value) => setVoiceMethod(value as VoiceMethod)}
               >
                 <SelectTrigger id="voice-select" className="w-full border-cyan-300/35">
                   <SelectValue placeholder="Select voice method" />
@@ -626,10 +371,7 @@ export function UploadVideoPanel() {
                       step={1}
                       inputMode="decimal"
                       value={pitchStepsInput}
-                      onChange={(event) => {
-                        setPitchStepsInput(event.target.value)
-                        setFormError(null)
-                      }}
+                      onChange={(event) => setPitchStepsInput(event.target.value)}
                       className="border-cyan-300/35"
                     />
                   </div>
@@ -645,10 +387,7 @@ export function UploadVideoPanel() {
                       min={0.5}
                       inputMode="decimal"
                       value={formantShiftInput}
-                      onChange={(event) => {
-                        setFormantShiftInput(event.target.value)
-                        setFormError(null)
-                      }}
+                      onChange={(event) => setFormantShiftInput(event.target.value)}
                       className="border-cyan-300/35"
                     />
                   </div>
@@ -666,10 +405,7 @@ export function UploadVideoPanel() {
                   min={0.5}
                   inputMode="decimal"
                   value={mcadamsAlphaInput}
-                  onChange={(event) => {
-                    setMcadamsAlphaInput(event.target.value)
-                    setFormError(null)
-                  }}
+                  onChange={(event) => setMcadamsAlphaInput(event.target.value)}
                   className="border-cyan-300/35"
                 />
                 <p className="text-xs text-muted-foreground">
@@ -710,10 +446,7 @@ export function UploadVideoPanel() {
                 step={1}
                 inputMode="numeric"
                 value={targetFpsInput}
-                onChange={(event) => {
-                  setTargetFpsInput(event.target.value)
-                  setFormError(null)
-                }}
+                onChange={(event) => setTargetFpsInput(event.target.value)}
                 className="border-cyan-300/35"
               />
             </div>
@@ -729,10 +462,7 @@ export function UploadVideoPanel() {
                   inputMode="decimal"
                   placeholder="Auto"
                   value={startSecInput}
-                  onChange={(event) => {
-                    setStartSecInput(event.target.value)
-                    setFormError(null)
-                  }}
+                  onChange={(event) => setStartSecInput(event.target.value)}
                   className="border-cyan-300/35"
                 />
               </div>
@@ -747,62 +477,21 @@ export function UploadVideoPanel() {
                   inputMode="decimal"
                   placeholder="Auto"
                   value={endSecInput}
-                  onChange={(event) => {
-                    setEndSecInput(event.target.value)
-                    setFormError(null)
-                  }}
+                  onChange={(event) => setEndSecInput(event.target.value)}
                   className="border-cyan-300/35"
                 />
               </div>
             </div>
           </section>
 
-          {formError && (
-            <div className="rounded-lg border border-red-400/35 bg-red-500/10 px-3 py-2 text-xs text-red-100">
-              {formError}
-            </div>
-          )}
-
+          {/* Inert in the UI-only shell: no processing backend is wired up. */}
           <Button
-            onClick={activateGuard}
-            disabled={!originalVideoUrl || !selectedFile || isProcessing}
+            disabled={!selectedFile}
             className="w-full bg-cyan-400 text-cyan-950 hover:bg-cyan-300"
           >
-            {isProcessing ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                {processingStatus === 'uploading' ? 'Uploading...' : 'Processing...'}
-              </>
-            ) : (
-              <>
-                <ShieldCheck className="size-4" />
-                Activate Guard
-              </>
-            )}
+            <ShieldCheck className="size-4" />
+            Activate Guard
           </Button>
-
-          {(isProcessing || processingProgress === 100) && (
-            <section className="rounded-xl border border-cyan-300/20 bg-cyan-500/10 p-4">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-foreground">Processing Status</p>
-                <Badge className="bg-cyan-500/20 text-cyan-700 dark:text-cyan-100">
-                  {isProcessing
-                    ? processingStatus === 'uploading'
-                      ? 'Uploading'
-                      : 'Running'
-                    : 'Completed'}
-                </Badge>
-              </div>
-              <Progress value={processingProgress} className="h-2.5" />
-              <p className="mt-2 text-xs text-muted-foreground">
-                {isProcessing
-                  ? processingStatus === 'uploading'
-                    ? 'Uploading the source video to the processing backend.'
-                    : 'Guard is processing this video with selected settings.'
-                  : 'Guard completed. Review the protected output on the right panel.'}
-              </p>
-            </section>
-          )}
         </CardContent>
       </Card>
 
@@ -815,37 +504,12 @@ export function UploadVideoPanel() {
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="relative aspect-video overflow-hidden rounded-xl border border-cyan-300/25 bg-slate-900/90">
-            {(isProcessing || !resultVideoUrl) && (
-              <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-slate-950/75 text-cyan-100">
-                {isProcessing ? (
-                  <>
-                    <Loader2 className="size-10 animate-spin text-cyan-300/90" />
-                    <p className="text-sm text-cyan-100/90">
-                      {processingStatus === 'uploading'
-                        ? 'Uploading source video...'
-                        : `Processing secure output... ${processingProgress}%`}
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <ShieldCheck className="size-10 text-cyan-300/70" />
-                    <p className="text-sm text-cyan-100/90">
-                      Activate Guard to generate processed preview.
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-
-            {resultVideoUrl && (
-              <video
-                key={resultVideoUrl}
-                src={resultVideoUrl}
-                controls
-                playsInline
-                className="h-full w-full object-contain"
-              />
-            )}
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-slate-950/75 text-cyan-100">
+              <ShieldCheck className="size-10 text-cyan-300/70" />
+              <p className="text-sm text-cyan-100/90">
+                Activate Guard to generate processed preview.
+              </p>
+            </div>
           </div>
 
           <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/10 px-4 py-3">
@@ -854,38 +518,9 @@ export function UploadVideoPanel() {
               <p className="text-sm font-semibold text-foreground">Output Summary</p>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              {lastRun ? (
-                <>
-                  Face: {getFilterLabel(lastRun.filter)} |
-                  {' '}
-                  Voice: {getVoiceLabel(lastRun.voiceMethod)} |
-                  {' '}
-                  Target {lastRun.targetFps} FPS |
-                  {' '}
-                  Range {lastRun.startSec ?? 'auto'}s to {lastRun.endSec ?? 'auto'}s
-                  {lastRun.filter !== 'swap' &&
-                    ` | Bounding Box ${lastRun.drawTracks ? 'On' : 'Off'}`}
-                  {' '}
-                  | {lastRun.elapsedSec.toFixed(1)}s
-                </>
-              ) : (
-                'Run Activate Guard to generate a protected output.'
-              )}
+              Run Activate Guard to generate a protected output.
             </p>
           </div>
-
-          {resultVideoUrl && (
-            <Button
-              asChild
-              variant="outline"
-              className="w-full border-cyan-300/35 bg-cyan-500/5 hover:bg-cyan-500/15"
-            >
-              <a href={resultVideoUrl} download>
-                <FileVideo className="size-4" />
-                Download Result
-              </a>
-            </Button>
-          )}
         </CardContent>
       </Card>
     </div>
