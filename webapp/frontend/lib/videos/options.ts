@@ -77,6 +77,52 @@ export const editStatusBadgeClass: Record<VideoEditStatus, string> = {
   failed: 'bg-rose-500/20 text-rose-700 dark:text-rose-300',
 }
 
+const visualMethodLabel: Record<string, string> = Object.fromEntries(
+  visualMethodOptions.map((option) => [option.value, option.label]),
+)
+
+const voiceMethodLabel: Record<VoiceMethod, string> = {
+  none: 'Original',
+  mcadams: 'McAdams',
+  pitch: 'Pitch shift',
+  formant: 'Formant shift',
+  pitch_formant: 'Pitch + Formant',
+  convert: 'Voice conversion',
+}
+
+/**
+ * One-line, human-readable summary of a persisted edit's `params` for History rows,
+ * e.g. "Blur • Voice: McAdams • 0–10s". Defensive against older/partial param sets.
+ */
+export function summarizeEditParams(params: Record<string, unknown> | null): string {
+  if (!params) {
+    return '—'
+  }
+
+  const parts: string[] = []
+
+  const visual = String(params.visual_method ?? 'blur')
+  parts.push(visualMethodLabel[visual] ?? visual)
+
+  if (params.keep_audio === false) {
+    parts.push('No audio')
+  } else if (params.anonymize_voice) {
+    const voice = String(params.voice_method ?? 'mcadams') as VoiceMethod
+    parts.push(`Voice: ${voiceMethodLabel[voice] ?? voice}`)
+  } else {
+    parts.push('Original audio')
+  }
+
+  const { start_sec: start, end_sec: end } = params
+  if (typeof start === 'number' || typeof end === 'number') {
+    const from = typeof start === 'number' ? start : 0
+    const to = typeof end === 'number' ? `${end}` : '…'
+    parts.push(`${from}–${to}s`)
+  }
+
+  return parts.join(' • ')
+}
+
 // --- Form model + form -> API mapping -------------------------------------- //
 
 /** Controlled state for the protection-settings form. Numbers stay as input

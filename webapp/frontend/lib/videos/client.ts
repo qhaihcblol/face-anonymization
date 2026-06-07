@@ -87,6 +87,10 @@ export function deleteVideo(videoId: number): Promise<void> {
   return requestJson<void>(`/${videoId}`, { method: 'DELETE' })
 }
 
+export function getVideoDownloadUrl(videoId: number): Promise<PresignedUrlResponse> {
+  return requestJson<PresignedUrlResponse>(`/${videoId}/download-url`)
+}
+
 export function createEdit(
   videoId: number,
   payload: VideoEditCreate,
@@ -95,6 +99,10 @@ export function createEdit(
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export function listEdits(videoId: number): Promise<VideoEditPublic[]> {
+  return requestJson<VideoEditPublic[]>(`/${videoId}/edits`)
 }
 
 export function getEdit(

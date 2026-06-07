@@ -1,127 +1,119 @@
-import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+'use client'
+
+import { useCallback, useEffect, useState } from 'react'
+import { AlertCircle, FileVideo, RefreshCcw } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
+import { HistoryVideoCard } from '@/components/faceguard/dashboard/history/history-video-card'
+import { VideoApiError, listVideos } from '@/lib/videos/client'
+import type { VideoPublic } from '@/lib/videos/types'
 
-const historyRows = [
-  {
-    id: 'FG-2419',
-    source: 'Webcam Live Session',
-    mode: 'Smart Blur',
-    status: 'Completed',
-    duration: '11m 32s',
-    createdAt: '2026-04-16 08:24',
-  },
-  {
-    id: 'FG-2418',
-    source: 'upload_ops_review.mp4',
-    mode: 'Privacy Mask',
-    status: 'Processing',
-    duration: '03m 10s',
-    createdAt: '2026-04-16 08:03',
-  },
-  {
-    id: 'FG-2417',
-    source: 'LobbyCam Feed',
-    mode: 'Edge Boost',
-    status: 'Completed',
-    duration: '27m 44s',
-    createdAt: '2026-04-16 07:42',
-  },
-  {
-    id: 'FG-2416',
-    source: 'warehouse_shift.mov',
-    mode: 'Smart Blur',
-    status: 'Flagged',
-    duration: '15m 08s',
-    createdAt: '2026-04-16 07:20',
-  },
-]
-
-function statusClass(status: string) {
-  if (status === 'Completed') {
-    return 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
-  }
-
-  if (status === 'Processing') {
-    return 'bg-cyan-500/20 text-cyan-700 dark:text-cyan-100'
-  }
-
-  return 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
-}
+type LoadState = 'loading' | 'error' | 'ready'
 
 export function HistoryPanel() {
+  const [videos, setVideos] = useState<VideoPublic[]>([])
+  const [loadState, setLoadState] = useState<LoadState>('loading')
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoadState('loading')
+    setError(null)
+    try {
+      setVideos(await listVideos())
+      setLoadState('ready')
+    } catch (err) {
+      setError(
+        err instanceof VideoApiError || err instanceof Error
+          ? err.message
+          : 'Could not load your videos.',
+      )
+      setLoadState('error')
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
   return (
     <div className="grid gap-6">
       <Card className="border-cyan-300/30 bg-background/75 backdrop-blur-sm">
         <CardHeader>
-          <CardTitle className="text-xl tracking-tight">Processing History</CardTitle>
-          <CardDescription>
-            Audit and track every processed stream and uploaded video batch.
-          </CardDescription>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-xl tracking-tight">Processing History</CardTitle>
+              <CardDescription>
+                Your uploaded videos and every identity-protection run on them.
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => void load()}
+              disabled={loadState === 'loading'}
+              className="border-cyan-300/35 bg-cyan-500/5 hover:bg-cyan-500/15"
+            >
+              <RefreshCcw
+                className={cn('size-4', loadState === 'loading' && 'animate-spin')}
+              />
+              Refresh
+            </Button>
+          </div>
         </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Job ID</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>Filter</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Duration</TableHead>
-                <TableHead>Created At</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {historyRows.map((row) => (
-                <TableRow key={row.id}>
-                  <TableCell className="font-semibold">{row.id}</TableCell>
-                  <TableCell>{row.source}</TableCell>
-                  <TableCell>{row.mode}</TableCell>
-                  <TableCell>
-                    <Badge className={statusClass(row.status)}>{row.status}</Badge>
-                  </TableCell>
-                  <TableCell>{row.duration}</TableCell>
-                  <TableCell className="text-muted-foreground">{row.createdAt}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
 
-      <Card className="border-cyan-300/30 bg-background/75 backdrop-blur-sm">
-        <CardHeader>
-          <CardTitle className="text-lg tracking-tight">Retention & Export</CardTitle>
-          <CardDescription>
-            Policy snapshot for archived identity-protected outputs.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-3">
-          <article className="rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3">
-            <p className="text-xs tracking-[0.12em] text-cyan-700 uppercase dark:text-cyan-200">
-              Archive Window
-            </p>
-            <p className="mt-1 text-base font-semibold">30 Days</p>
-          </article>
-          <article className="rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3">
-            <p className="text-xs tracking-[0.12em] text-cyan-700 uppercase dark:text-cyan-200">
-              Encryption
-            </p>
-            <p className="mt-1 text-base font-semibold">AES-256</p>
-          </article>
-          <article className="rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3">
-            <p className="text-xs tracking-[0.12em] text-cyan-700 uppercase dark:text-cyan-200">
-              Last Export
-            </p>
-            <p className="mt-1 text-base font-semibold">2026-04-16 08:30</p>
-          </article>
+        <CardContent className="space-y-3">
+          {loadState === 'loading' && (
+            <div className="space-y-3">
+              {Array.from({ length: 3 }).map((_, index) => (
+                <Skeleton key={index} className="h-16 w-full rounded-xl" />
+              ))}
+            </div>
+          )}
+
+          {loadState === 'error' && (
+            <Alert variant="destructive" className="border-destructive/30">
+              <AlertCircle className="size-4" />
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <span>{error}</span>
+                <Button size="sm" variant="outline" onClick={() => void load()}>
+                  Retry
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {loadState === 'ready' && videos.length === 0 && (
+            <Empty className="border border-cyan-300/20 bg-cyan-500/5">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <FileVideo />
+                </EmptyMedia>
+                <EmptyTitle>No videos yet</EmptyTitle>
+                <EmptyDescription>
+                  Upload a video from the Upload tab to see its protection history here.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          )}
+
+          {loadState === 'ready' &&
+            videos.map((video) => <HistoryVideoCard key={video.id} video={video} />)}
         </CardContent>
       </Card>
     </div>
