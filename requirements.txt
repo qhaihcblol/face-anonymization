@@ -1,5 +1,5 @@
 # AI core / inference
-onnxruntime-gpu        # CPU-only: thay bằng `onnxruntime`
+onnxruntime-gpu[cuda,cudnn]     
 scipy
 librosa
 opencv-python
