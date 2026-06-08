@@ -183,61 +183,22 @@ pnpm dev
 
 ---
 
-## 5. Deploy production (tự host full-stack bằng Docker)
+## 5. Deploy production
 
-Deploy cả frontend + backend trên cùng 1 VM, sau 1 Nginx, dùng 2 subdomain. File sẵn
-trong repo: [Dockerfile](Dockerfile) (backend), [webapp/frontend/Dockerfile](webapp/frontend/Dockerfile),
-[docker-compose.yml](docker-compose.yml), [deploy/nginx.conf.example](deploy/nginx.conf.example).
+Phần deploy production đang được thiết kế lại. Các artifact deploy cũ đã được gỡ để
+repo chỉ giữ phần lõi ứng dụng (`ai_core`, `webapp`) và tránh tài liệu trỏ vào một
+topology chưa chốt.
 
-### 5.1. Vì sao 2 subdomain
+Các ràng buộc vẫn cần giữ khi thiết kế deploy mới:
 
-Backend **phải có hostname công khai** vì live camera để browser nối WebSocket *thẳng*
-tới `wss://api.../api/live/ws` (route ticket nhúng URL này từ `BACKEND_API_BASE_URL`).
-Không thể giấu backend sau địa chỉ nội bộ Docker. Topology:
-
-- `app.your-domain.com` → frontend (`next start`, :3000)
-- `api.your-domain.com` → backend (FastAPI, :8000) — có WebSocket + upload lớn
-- `BACKEND_API_BASE_URL=https://api.your-domain.com/api`
-
-### 5.2. Các bước
-
-```bash
-# 1. Lấy code + model + env lên VM
-git clone https://github.com/qhaihcblol/face-anonymization.git
-cd face-anonymization
-pip install kagglehub && python scripts/download_onnx_files.py   # đổ vào ai_core/*/onnx (mount vào container)
-nano webapp/backend/.env          # theo mẫu mục 3.1; CORS_ORIGINS chứa https://app.your-domain.com
-
-# 2. Sửa BACKEND_API_BASE_URL trong docker-compose.yml (service frontend) -> domain api thật
-
-# 3. Build & chạy
-docker compose up -d --build
-docker compose logs -f
-curl http://127.0.0.1:8000/health     # -> {"status":"ok"}
-
-# 4. Reverse proxy + TLS
-sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/faceguard
-# sửa server_name (app/api), rồi:
-sudo ln -s /etc/nginx/sites-available/faceguard /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d app.your-domain.com -d api.your-domain.com
-```
-
-> **CPU vs GPU:** ảnh backend mặc định CPU-only ([Dockerfile](Dockerfile) tự đổi
-> `onnxruntime-gpu`→`onnxruntime`). Muốn GPU: dùng base image CUDA, bỏ dòng `sed`,
-> bỏ comment khối `deploy.resources` trong compose, cài `nvidia-container-toolkit`.
->
-> **Workers:** giữ `--workers 1` cho backend — mỗi worker nạp ONNX riêng (nhân RAM/VRAM).
-> Scale bằng nhiều container + load balancer.
-
-### 5.3. Checklist trước khi deploy
-
-- [ ] `webapp/backend/.env`: `SECRET_KEY` mạnh, `DATABASE_URL`, R2 đầy đủ, `CORS_ORIGINS` chứa domain `app.*`
-- [ ] `docker-compose.yml`: `BACKEND_API_BASE_URL` (service frontend) trỏ `https://api.your-domain.com/api`
-- [ ] Đã chạy `download_onnx_files.py` (model ONNX có trong `ai_core/*/onnx/` — được mount vào container)
-- [ ] PostgreSQL chạy và truy cập được; R2 bucket tồn tại, key có quyền read/write
-- [ ] DNS: `app.*` và `api.*` cùng trỏ về VM; đã cấp TLS cho cả hai
-- [ ] Nginx: `client_max_body_size` đủ lớn ở **cả hai** server block; forward WebSocket cho `/api/live/ws`
+- Backend cần hostname công khai nếu dùng live camera, vì browser nối WebSocket tới
+  `/api/live/ws`.
+- `BACKEND_API_BASE_URL` của frontend phải trỏ tới URL API production, ví dụ
+  `https://api.your-domain.com/api`.
+- Backend vẫn cần PostgreSQL, R2/S3 storage, FFmpeg và model ONNX trong
+  `ai_core/*/onnx/`.
+- Khi chạy GPU, giữ số process backend thấp; mỗi process sẽ nạp một bộ ONNX riêng
+  vào RAM/VRAM.
 
 ---
 
