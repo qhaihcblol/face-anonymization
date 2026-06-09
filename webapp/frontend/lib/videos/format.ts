@@ -31,3 +31,29 @@ export function formatDateTime(iso: string): string {
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
+
+export function formatResolution(
+  width: number | null,
+  height: number | null,
+): string | null {
+  if (!width || !height) {
+    return null
+  }
+  return `${width}×${height}`
+}
+
+/** Wall-clock time between two ISO timestamps (e.g. how long a run took). */
+export function formatElapsed(
+  fromIso: string,
+  toIso: string | null,
+): string | null {
+  if (!toIso) {
+    return null
+  }
+  const from = new Date(fromIso).getTime()
+  const to = new Date(toIso).getTime()
+  if (Number.isNaN(from) || Number.isNaN(to) || to < from) {
+    return null
+  }
+  return formatDuration((to - from) / 1000)
+}

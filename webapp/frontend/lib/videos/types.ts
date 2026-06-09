@@ -89,9 +89,14 @@ export type VideoUploadTicket = {
   expires_in: number
 }
 
-/** Request body for `POST /api/videos` — confirm a direct upload finished. */
+/** Request body for `POST /api/videos` — confirm a direct upload finished.
+ * Duration/dimensions are probed client-side and optional (a browser that can't
+ * read them still completes the upload). */
 export type VideoUploadComplete = {
   storage_key: string
   original_filename: string
   content_type: string | null
+  duration_sec: number | null
+  width: number | null
+  height: number | null
 }

@@ -131,6 +131,46 @@ export type UploadOptions = {
   signal?: AbortSignal
 }
 
+type VideoMetadata = {
+  duration_sec: number | null
+  width: number | null
+  height: number | null
+}
+
+const EMPTY_METADATA: VideoMetadata = { duration_sec: null, width: null, height: null }
+
+/**
+ * Read duration + dimensions from a video file via a throwaway `<video>` element.
+ * The backend never sees the bytes (direct-to-storage uploads), so this is the only
+ * place that metadata can be captured. Best-effort: any failure resolves to nulls so
+ * it can never block an upload.
+ */
+function probeVideoMetadata(file: File): Promise<VideoMetadata> {
+  if (typeof document === 'undefined') {
+    return Promise.resolve(EMPTY_METADATA)
+  }
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file)
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+
+    const finish = (metadata: VideoMetadata) => {
+      URL.revokeObjectURL(url)
+      resolve(metadata)
+    }
+
+    video.onloadedmetadata = () => {
+      finish({
+        duration_sec: Number.isFinite(video.duration) ? video.duration : null,
+        width: video.videoWidth || null,
+        height: video.videoHeight || null,
+      })
+    }
+    video.onerror = () => finish(EMPTY_METADATA)
+    video.src = url
+  })
+}
+
 /** Step 1: ask the backend for a presigned URL to upload the file to. */
 function createUploadTicket(init: VideoUploadInit): Promise<VideoUploadTicket> {
   return requestJson<VideoUploadTicket>('/upload-url', {
@@ -227,6 +267,8 @@ export async function uploadVideo(
   }
 
   const contentType = file.type || null
+  // Probe metadata while the presign round-trip is in flight — it adds no latency.
+  const metadataPromise = probeVideoMetadata(file)
   const ticket = await createUploadTicket({
     filename: file.name,
     content_type: contentType,
@@ -239,5 +281,6 @@ export async function uploadVideo(
     storage_key: ticket.storage_key,
     original_filename: file.name,
     content_type: contentType,
+    ...(await metadataPromise),
   })
 }

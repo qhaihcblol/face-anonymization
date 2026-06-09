@@ -138,5 +138,10 @@ class VideoUploadComplete(BaseModel):
     storage_key: str = Field(min_length=1, max_length=512)
     original_filename: str = Field(min_length=1, max_length=255)
     content_type: str | None = Field(default=None, max_length=100)
+    # Probed client-side from the file (the bytes never reach the app server), so all
+    # optional — a browser that can't read the metadata still completes the upload.
+    duration_sec: float | None = Field(default=None, ge=0)
+    width: int | None = Field(default=None, ge=0)
+    height: int | None = Field(default=None, ge=0)
 
     model_config = ConfigDict(str_strip_whitespace=True)

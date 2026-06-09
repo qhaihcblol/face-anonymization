@@ -108,6 +108,9 @@ class VideoService:
             storage_key=storage_key,
             content_type=stat.content_type or payload.content_type,
             size_bytes=stat.size_bytes,
+            duration_sec=payload.duration_sec,
+            width=payload.width,
+            height=payload.height,
         )
 
     # ------------------------------------------------------------------ #

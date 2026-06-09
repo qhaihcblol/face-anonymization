@@ -142,37 +142,89 @@ const voiceMethodLabel: Record<VoiceMethod, string> = {
   convert: 'Voice conversion',
 }
 
-/**
- * One-line, human-readable summary of a persisted edit's `params` for History rows,
- * e.g. "Blur • Voice: McAdams • 0–10s". Defensive against older/partial param sets.
- */
-export function summarizeEditParams(params: Record<string, unknown> | null): string {
-  if (!params) {
-    return '—'
+/** Structured, human-readable view of a persisted edit's `params`, used to render
+ * the History detail. Each field is defensive against older / partial param sets. */
+export type EditSummary = {
+  /** Face/image processing: the method plus its key knob (and a colour for masks). */
+  image: { method: string; detail: string | null; color: string | null }
+  /** Audio handling: kept, removed, or anonymized (with the voice method + knob). */
+  audio: { mode: string; detail: string | null }
+  /** Processing window, e.g. "0–10s" or "From 5s" — `null` when the whole clip ran. */
+  range: string | null
+  /** Re-encode frame rate, e.g. "30 fps" — `null` when the source rate was kept. */
+  fps: string | null
+  /** Whether detection boxes were burned into the output. */
+  drawBoxes: boolean
+}
+
+function paramNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function describeImage(params: Record<string, unknown>): EditSummary['image'] {
+  const method = String(params.visual_method ?? 'blur')
+  const label = visualMethodLabel[method] ?? method
+  switch (method) {
+    case 'blur':
+      return { method: label, detail: `Strength ${paramNumber(params.blur_strength, 31)}`, color: null }
+    case 'pixelate':
+      return { method: label, detail: `Level ${paramNumber(params.pixelation_level, 16)}`, color: null }
+    case 'mask': {
+      const color =
+        typeof params.mask_color === 'string' ? params.mask_color : '#A0A0A0'
+      return { method: label, detail: color.toUpperCase(), color }
+    }
+    default:
+      return { method: label, detail: null, color: null }
   }
+}
 
-  const parts: string[] = []
+function describeVoice(method: VoiceMethod, params: Record<string, unknown>): string {
+  const label = voiceMethodLabel[method] ?? method
+  switch (method) {
+    case 'mcadams':
+      return `${label} · α${paramNumber(params.mcadams_alpha, 0.8)}`
+    case 'pitch':
+      return `${label} · ${paramNumber(params.pitch_steps, -4)} st`
+    case 'formant':
+      return `${label} · ×${paramNumber(params.formant_shift, 1.2)}`
+    case 'pitch_formant':
+      return `${label} · ${paramNumber(params.pitch_steps, -4)} st, ×${paramNumber(params.formant_shift, 1.2)}`
+    default:
+      return label
+  }
+}
 
-  const visual = String(params.visual_method ?? 'blur')
-  parts.push(visualMethodLabel[visual] ?? visual)
-
+function describeAudio(params: Record<string, unknown>): EditSummary['audio'] {
   if (params.keep_audio === false) {
-    parts.push('No audio')
-  } else if (params.anonymize_voice) {
+    return { mode: 'Removed', detail: null }
+  }
+  if (params.anonymize_voice) {
     const voice = String(params.voice_method ?? 'mcadams') as VoiceMethod
-    parts.push(`Voice: ${voiceMethodLabel[voice] ?? voice}`)
-  } else {
-    parts.push('Original audio')
+    return { mode: 'Anonymized', detail: describeVoice(voice, params) }
   }
+  return { mode: 'Original', detail: null }
+}
 
-  const { start_sec: start, end_sec: end } = params
-  if (typeof start === 'number' || typeof end === 'number') {
-    const from = typeof start === 'number' ? start : 0
-    const to = typeof end === 'number' ? `${end}` : '…'
-    parts.push(`${from}–${to}s`)
+function describeRange(params: Record<string, unknown>): string | null {
+  const start = typeof params.start_sec === 'number' ? params.start_sec : null
+  const end = typeof params.end_sec === 'number' ? params.end_sec : null
+  if (start === null && end === null) {
+    return null
   }
+  const from = start ?? 0
+  return end === null ? `From ${from}s` : `${from}–${end}s`
+}
 
-  return parts.join(' • ')
+export function summarizeEdit(params: Record<string, unknown> | null): EditSummary {
+  const p = params ?? {}
+  return {
+    image: describeImage(p),
+    audio: describeAudio(p),
+    range: describeRange(p),
+    fps: typeof p.target_fps === 'number' ? `${p.target_fps} fps` : null,
+    drawBoxes: p.draw_boxes === true,
+  }
 }
 
 // --- Form model + form -> API mapping -------------------------------------- //
