@@ -107,3 +107,36 @@ class VideoEditPublic(BaseModel):
 class PresignedUrlResponse(BaseModel):
     url: str
     expires_in: int
+
+
+class VideoUploadInit(BaseModel):
+    """Request to start a direct-to-storage upload (step 1 of the upload flow)."""
+
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str | None = Field(default=None, max_length=100)
+    # Declared size, validated up front so oversized files are rejected before any
+    # bytes are sent. The real size is re-checked from storage on completion.
+    size_bytes: int | None = Field(default=None, ge=0)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class VideoUploadTicket(BaseModel):
+    """A presigned upload target the client PUTs the file to (step 1 response)."""
+
+    storage_key: str
+    upload_url: str
+    method: str = "PUT"
+    # Headers the client must send with the PUT (e.g. ``Content-Type``).
+    headers: dict[str, str] = Field(default_factory=dict)
+    expires_in: int
+
+
+class VideoUploadComplete(BaseModel):
+    """Confirms an upload finished, so the server can register it (step 3)."""
+
+    storage_key: str = Field(min_length=1, max_length=512)
+    original_filename: str = Field(min_length=1, max_length=255)
+    content_type: str | None = Field(default=None, max_length=100)
+
+    model_config = ConfigDict(str_strip_whitespace=True)

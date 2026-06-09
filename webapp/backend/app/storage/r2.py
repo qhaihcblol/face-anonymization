@@ -3,10 +3,20 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, BinaryIO
 
-from app.storage.base import Storage, StorageError
+from app.storage.base import ObjectStat, Storage, StorageError
 
 if TYPE_CHECKING:
     from app.core.config import Settings
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """True if a botocore error means "object does not exist" (404 / NoSuchKey)."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get("Error", {}).get("Code", ""))
+    http_status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in {"404", "NoSuchKey", "NotFound"} or http_status == 404
 
 
 class R2Storage(Storage):
@@ -134,6 +144,47 @@ class R2Storage(Storage):
             raise StorageError(
                 f"Failed to presign download URL for '{key}': {exc}"
             ) from exc
+
+    async def generate_presigned_put_url(
+        self,
+        key: str,
+        expires_in: int | None = None,
+    ) -> str:
+        client = self._client_or_raise()
+        expires = int(expires_in) if expires_in else self._presign_expiry_seconds
+        try:
+            # Sign only the bucket + key: the browser may send a Content-Type header
+            # (which R2 stores on the object) without it being part of the signature,
+            # so a header mismatch can never break the upload.
+            return await asyncio.to_thread(
+                client.generate_presigned_url,
+                "put_object",
+                Params={"Bucket": self._bucket, "Key": key},
+                ExpiresIn=expires,
+            )
+        except StorageError:
+            raise
+        except Exception as exc:
+            raise StorageError(
+                f"Failed to presign upload URL for '{key}': {exc}"
+            ) from exc
+
+    async def head(self, key: str) -> ObjectStat | None:
+        client = self._client_or_raise()
+        try:
+            response = await asyncio.to_thread(
+                client.head_object, Bucket=self._bucket, Key=key
+            )
+        except StorageError:
+            raise
+        except Exception as exc:  # botocore.ClientError and friends
+            if _is_not_found(exc):
+                return None
+            raise StorageError(f"Failed to head object '{key}' in R2: {exc}") from exc
+        return ObjectStat(
+            size_bytes=int(response.get("ContentLength", 0)),
+            content_type=response.get("ContentType"),
+        )
 
     async def delete(self, key: str) -> None:
         client = self._client_or_raise()

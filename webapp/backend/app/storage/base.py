@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import BinaryIO
 
 
@@ -10,6 +11,14 @@ class StorageError(RuntimeError):
     Covers both misconfiguration (no credentials) and runtime failures (network,
     permissions). The API layer maps it to a 502 response.
     """
+
+
+@dataclass(frozen=True)
+class ObjectStat:
+    """Metadata of a stored object, as returned by :meth:`Storage.head`."""
+
+    size_bytes: int
+    content_type: str | None = None
 
 
 class Storage(ABC):
@@ -39,6 +48,23 @@ class Storage(ABC):
         expires_in: int | None = None,
     ) -> str:
         """Return a time-limited URL to download the object at ``key``."""
+
+    @abstractmethod
+    async def generate_presigned_put_url(
+        self,
+        key: str,
+        expires_in: int | None = None,
+    ) -> str:
+        """Return a time-limited URL the client can ``PUT`` an object to directly.
+
+        Lets the browser upload straight to object storage, so large files never pass
+        through the application servers. Only the bucket + key are signed, so the
+        client may send a ``Content-Type`` header without breaking the signature.
+        """
+
+    @abstractmethod
+    async def head(self, key: str) -> ObjectStat | None:
+        """Return the object's metadata, or ``None`` if it does not exist."""
 
     @abstractmethod
     async def delete(self, key: str) -> None:

@@ -10,6 +10,9 @@ import type {
   VideoEditCreate,
   VideoEditPublic,
   VideoPublic,
+  VideoUploadComplete,
+  VideoUploadInit,
+  VideoUploadTicket,
 } from '@/lib/videos/types'
 
 const BASE_PATH = '/api/videos'
@@ -119,7 +122,7 @@ export function getEditDownloadUrl(
   return requestJson<PresignedUrlResponse>(`/${videoId}/edits/${editId}/download-url`)
 }
 
-// --- Upload (XHR, for progress) -------------------------------------------- //
+// --- Upload (presigned, direct-to-storage) --------------------------------- //
 
 export type UploadProgress = { loaded: number; total: number; percent: number }
 
@@ -128,25 +131,45 @@ export type UploadOptions = {
   signal?: AbortSignal
 }
 
-/** Upload one video file. `fetch` can't report upload progress, so we use XHR. */
-export function uploadVideo(
+/** Step 1: ask the backend for a presigned URL to upload the file to. */
+function createUploadTicket(init: VideoUploadInit): Promise<VideoUploadTicket> {
+  return requestJson<VideoUploadTicket>('/upload-url', {
+    method: 'POST',
+    body: JSON.stringify(init),
+  })
+}
+
+/** Step 3: tell the backend the upload finished so it registers the video. */
+function completeUpload(payload: VideoUploadComplete): Promise<VideoPublic> {
+  return requestJson<VideoPublic>('', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/**
+ * Step 2: PUT the file straight to object storage (R2). `fetch` can't report
+ * upload progress, so we use XHR. This call is cross-origin to the storage host,
+ * which must allow PUT via its CORS policy.
+ */
+function putToStorage(
+  ticket: VideoUploadTicket,
   file: File,
-  options: UploadOptions = {},
-): Promise<VideoPublic> {
+  options: UploadOptions,
+): Promise<void> {
   const { onProgress, signal } = options
 
-  return new Promise<VideoPublic>((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new VideoApiError(0, 'Upload cancelled.'))
       return
     }
 
-    const formData = new FormData()
-    formData.append('file', file)
-
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', BASE_PATH)
-    xhr.responseType = 'json'
+    xhr.open(ticket.method || 'PUT', ticket.upload_url)
+    for (const [name, value] of Object.entries(ticket.headers)) {
+      xhr.setRequestHeader(name, value)
+    }
 
     const onAbort = () => xhr.abort()
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -167,20 +190,54 @@ export function uploadVideo(
     xhr.onload = () => {
       cleanup()
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(xhr.response as VideoPublic)
+        resolve()
       } else {
-        reject(new VideoApiError(xhr.status, messageFromBody(xhr.response, xhr.status)))
+        reject(new VideoApiError(xhr.status, `Upload to storage failed (${xhr.status}).`))
       }
     }
     xhr.onerror = () => {
       cleanup()
-      reject(new VideoApiError(0, 'Network error during upload.'))
+      reject(
+        new VideoApiError(
+          0,
+          'Network error during upload. The storage CORS policy may be blocking it.',
+        ),
+      )
     }
     xhr.onabort = () => {
       cleanup()
       reject(new VideoApiError(0, 'Upload cancelled.'))
     }
 
-    xhr.send(formData)
+    xhr.send(file)
+  })
+}
+
+/**
+ * Upload one video file directly to object storage, then register it with the
+ * backend. Three steps: presign → PUT to storage → confirm. The file bytes never
+ * pass through the app servers, so uploads aren't bound by request-body limits.
+ */
+export async function uploadVideo(
+  file: File,
+  options: UploadOptions = {},
+): Promise<VideoPublic> {
+  if (options.signal?.aborted) {
+    throw new VideoApiError(0, 'Upload cancelled.')
+  }
+
+  const contentType = file.type || null
+  const ticket = await createUploadTicket({
+    filename: file.name,
+    content_type: contentType,
+    size_bytes: file.size,
+  })
+
+  await putToStorage(ticket, file, options)
+
+  return completeUpload({
+    storage_key: ticket.storage_key,
+    original_filename: file.name,
+    content_type: contentType,
   })
 }

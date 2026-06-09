@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
     r2_region: str = "auto"
+    # Lifetime of presigned GET (download) URLs.
     r2_presign_expiry_seconds: int = 3600
+    # Lifetime of presigned PUT (upload) URLs. Longer than the download default so a
+    # slow client uploading a large file still finishes before the URL expires.
+    r2_upload_url_expiry_seconds: int = 3600
 
     # --- Video upload constraints ---
     video_max_upload_mb: int = 2048

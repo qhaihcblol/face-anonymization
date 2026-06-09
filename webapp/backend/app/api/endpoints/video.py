@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, get_video_service
@@ -9,6 +9,9 @@ from app.schemas.video import (
     VideoEditCreate,
     VideoEditPublic,
     VideoPublic,
+    VideoUploadComplete,
+    VideoUploadInit,
+    VideoUploadTicket,
 )
 from app.services.video_service import VideoService
 
@@ -19,14 +22,25 @@ def _presigned(url: str) -> PresignedUrlResponse:
     return PresignedUrlResponse(url=url, expires_in=settings.r2_presign_expiry_seconds)
 
 
+@router.post("/upload-url", response_model=VideoUploadTicket)
+async def create_upload_url(
+    payload: VideoUploadInit,
+    current_user: User = Depends(get_current_user),
+    service: VideoService = Depends(get_video_service),
+) -> VideoUploadTicket:
+    """Step 1: validate the request and return a presigned URL to upload to directly."""
+    return await service.create_upload_ticket(current_user, payload)
+
+
 @router.post("", response_model=VideoPublic, status_code=status.HTTP_201_CREATED)
-async def upload_video(
-    file: UploadFile = File(...),
+async def complete_upload(
+    payload: VideoUploadComplete,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     service: VideoService = Depends(get_video_service),
 ) -> VideoPublic:
-    video = await service.upload_video(db, current_user, file)
+    """Step 3: confirm a direct upload finished, registering the video."""
+    video = await service.complete_upload(db, current_user, payload)
     return VideoPublic.model_validate(video)
 
 

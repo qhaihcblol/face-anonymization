@@ -72,3 +72,26 @@ export type PresignedUrlResponse = {
   url: string
   expires_in: number
 }
+
+/** Request body for `POST /api/videos/upload-url` — start a direct upload. */
+export type VideoUploadInit = {
+  filename: string
+  content_type: string | null
+  size_bytes: number | null
+}
+
+/** A presigned upload target: PUT the file straight to `upload_url`. */
+export type VideoUploadTicket = {
+  storage_key: string
+  upload_url: string
+  method: string
+  headers: Record<string, string>
+  expires_in: number
+}
+
+/** Request body for `POST /api/videos` — confirm a direct upload finished. */
+export type VideoUploadComplete = {
+  storage_key: string
+  original_filename: string
+  content_type: string | null
+}
