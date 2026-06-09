@@ -74,7 +74,17 @@ corepack prepare pnpm@latest --activate
 pnpm -v
 ```
 
-### 2.1. Tải model ONNX
+### 2.1. Cài thư viện Python
+
+```bash
+pip install -r requirements.txt
+```
+
+> `requirements.txt` cài sẵn `onnxruntime-gpu[cuda,cudnn]` — đã kèm CUDA + cuDNN runtime,
+> không cần cài thêm gói `nvidia-*` thủ công. **Nếu chạy CPU‑only**, đổi dòng đó trong
+> `requirements.txt` thành `onnxruntime`.
+
+### 2.2. Tải model ONNX
 
 ```bash
 # Tạo thư mục chứa model
@@ -84,28 +94,13 @@ mkdir -p ai_core/face_detection/onnx \
          ai_core/face_restoration/onnx \
          ai_core/voice_anonymization/onnx
 
-# Tải từ Kaggle dataset (quanghijr/video-anonymization-onnx)
-pip install kagglehub
+# Tải từ Kaggle dataset (quanghijr/video-anonymization-onnx); kagglehub đã có trong requirements
 python scripts/download_onnx_files.py
 ```
 
 > Cần đăng nhập Kaggle (`kaggle.json` trong `~/.kaggle/` hoặc biến môi trường
 > `KAGGLE_USERNAME` / `KAGGLE_KEY`). Nếu model voice (`wavlm_encoder.onnx`,
 > `hifigan_vocoder.onnx`) thiếu, pipeline tự fallback sang ẩn danh giọng bằng DSP.
-
-### 2.2. Cài thư viện Python
-
-```bash
-pip install -r requirements.txt
-```
-
-> `requirements.txt` mặc định cài `onnxruntime-gpu`. **Nếu chạy CPU‑only**, hãy đổi
-> sang `onnxruntime` (gỡ `onnxruntime-gpu` trước để tránh xung đột). Với GPU, đảm bảo
-> CUDA/cuDNN khớp phiên bản onnxruntime, hoặc cài thêm:
-> ```bash
-> pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 \
->             nvidia-cufft-cu12 nvidia-curand-cu12
-> ```
 
 ---
 
@@ -234,15 +229,14 @@ curl -sL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
 bash /tmp/mc.sh -b -p ./.conda
 ./.conda/bin/conda install -p ./.conda python=3.12 -y
 
-./.conda/bin/pip install -r requirements.txt          # mặc định onnxruntime-gpu
-# model ONNX (xem mục 2.1):
-./.conda/bin/pip install kagglehub
+./.conda/bin/pip install -r requirements.txt   # onnxruntime-gpu[cuda,cudnn] + kagglehub
+
+# model ONNX (xem mục 2.2):
 mkdir -p ai_core/face_detection/onnx ai_core/face_parsing/onnx \
          ai_core/face_swapping/onnx ai_core/face_restoration/onnx \
          ai_core/voice_anonymization/onnx
 ./.conda/bin/python scripts/download_onnx_files.py
 ```
-> Nếu onnxruntime báo thiếu cuDNN/cuBLAS, cài thêm các gói `nvidia-*-cu12` (xem mục 2.2).
 
 **4) Tạo `webapp/backend/.env`** (xem mục 3.1): `SECRET_KEY`, `DATABASE_URL` trỏ Postgres
 managed, `R2_*` đầy đủ. `CORS_ORIGINS` không bắt buộc (call đi qua proxy server‑side).

@@ -1,8 +1,9 @@
 # AI core / inference
-onnxruntime-gpu[cuda,cudnn]     
+onnxruntime-gpu[cuda,cudnn]
 scipy
 librosa
 opencv-python
+kagglehub                       # tải model ONNX qua scripts/download_onnx_files.py
 
 # Backend (FastAPI)
 fastapi[standard]
