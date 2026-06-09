@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { useAnonymization } from '@/components/faceguard/dashboard/anonymization-provider'
 import { ResultCard } from '@/components/faceguard/dashboard/upload/result-card'
 import { ProtectionSettingsCard } from '@/components/faceguard/dashboard/upload/protection-settings-card'
 import { SourceCard } from '@/components/faceguard/dashboard/upload/source-card'
@@ -10,7 +11,6 @@ import {
   defaultProtectionForm,
   type ProtectionForm,
 } from '@/lib/videos/options'
-import { useVideoAnonymization } from '@/lib/videos/use-video-anonymization'
 
 /**
  * Orchestrates the Upload Video workflow. Owns the selected file, its local preview
@@ -23,7 +23,7 @@ export function UploadVideoPanel() {
   const [form, setForm] = useState<ProtectionForm>(defaultProtectionForm)
 
   const previewUrlRef = useRef<string | null>(null)
-  const anonymization = useVideoAnonymization()
+  const anonymization = useAnonymization()
   const { phase, uploadPercent, isRunning, run, reset } = anonymization
 
   const { payload, error: rangeError } = useMemo(

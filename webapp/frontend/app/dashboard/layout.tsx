@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { AnonymizationProvider } from '@/components/faceguard/dashboard/anonymization-provider'
 import { DashboardTabs } from '@/components/faceguard/dashboard/dashboard-tabs'
 import { SiteHeader } from '@/components/faceguard/site-header'
 import { Badge } from '@/components/ui/badge'
@@ -40,7 +41,7 @@ export default async function DashboardLayout({
         </header>
 
         <DashboardTabs />
-        {children}
+        <AnonymizationProvider>{children}</AnonymizationProvider>
       </main>
     </div>
   )
