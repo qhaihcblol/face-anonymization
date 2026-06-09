@@ -43,6 +43,24 @@ export const resolutionConfig: Record<
   '1080p': { width: 1920, height: 1080, label: '1080p (Full HD, 16:9)' },
 }
 
+/**
+ * Wires the camera hook to the anonymized output so recordings capture the
+ * de-identified frames instead of the raw feed.
+ */
+export type UseLiveCameraOptions = {
+  /**
+   * Canvas that {@link useLiveProcessing} paints the anonymized output onto.
+   * Recorded in place of the raw webcam stream whenever protection is live.
+   */
+  processedCanvasRef?: RefObject<HTMLCanvasElement | null>
+  /**
+   * Read at record-start time: `true` while the processed canvas is actively
+   * painting protected frames. A ref (not a value) so the long-lived controller
+   * always sees the current state without re-creating the hook.
+   */
+  recordProcessedRef?: RefObject<boolean>
+}
+
 /** Everything the workspace needs to render and drive the camera. */
 export type LiveCameraController = {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -92,9 +110,17 @@ function mapCameraDevices(devices: MediaDeviceInfo[]): CameraDevice[] {
     }))
 }
 
-export function useLiveCamera(): LiveCameraController {
+export function useLiveCamera(
+  options: UseLiveCameraOptions = {},
+): LiveCameraController {
+  const { processedCanvasRef, recordProcessedRef } = options
+
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  // The stream actually fed to the active recorder: either the raw camera stream
+  // (streamRef) or a canvas capture of the anonymized output. Tracked separately
+  // so we only tear down a canvas capture, never the live camera.
+  const recordStreamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const startedAtRef = useRef<number>(0)
@@ -184,6 +210,16 @@ export function useLiveCamera(): LiveCameraController {
     }
 
     recorder.stop()
+  }
+
+  // Stop the recorder's source only when it's a canvas capture we created — the
+  // raw camera stream is owned by streamRef and torn down by stopStream.
+  const releaseRecordingStream = () => {
+    const recordingStream = recordStreamRef.current
+    recordStreamRef.current = null
+    if (recordingStream && recordingStream !== streamRef.current) {
+      recordingStream.getTracks().forEach((track) => track.stop())
+    }
   }
 
   const stopStream = (updateStatus = true) => {
@@ -296,10 +332,23 @@ export function useLiveCamera(): LiveCameraController {
       return
     }
 
+    // Record the anonymized canvas while protection is live so saved clips never
+    // contain the original face; fall back to the raw feed only for the no-filter
+    // local preview — which is exactly what's shown on screen.
+    const processedCanvas = recordProcessedRef?.current
+      ? processedCanvasRef?.current ?? null
+      : null
+    const recordingStream =
+      processedCanvas && typeof processedCanvas.captureStream === 'function'
+        ? processedCanvas.captureStream()
+        : streamRef.current
+
+    recordStreamRef.current = recordingStream
+
     const mimeType = getRecorderMimeType()
     const recorder = mimeType
-      ? new MediaRecorder(streamRef.current, { mimeType })
-      : new MediaRecorder(streamRef.current)
+      ? new MediaRecorder(recordingStream, { mimeType })
+      : new MediaRecorder(recordingStream)
 
     chunksRef.current = []
     startedAtRef.current = Date.now()
@@ -311,6 +360,8 @@ export function useLiveCamera(): LiveCameraController {
     }
 
     recorder.onstop = () => {
+      releaseRecordingStream()
+
       const clipBlob = new Blob(chunksRef.current, {
         type: recorder.mimeType || 'video/webm',
       })
@@ -341,6 +392,7 @@ export function useLiveCamera(): LiveCameraController {
     }
 
     recorder.onerror = () => {
+      releaseRecordingStream()
       if (isMountedRef.current) {
         setErrorMessage('Recording failed. Please retry.')
         setIsRecording(false)
@@ -417,6 +469,8 @@ export function useLiveCamera(): LiveCameraController {
       if (recorderRef.current && recorderRef.current.state !== 'inactive') {
         recorderRef.current.stop()
       }
+
+      releaseRecordingStream()
 
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop())

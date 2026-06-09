@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { CameraControlsCard } from '@/components/faceguard/dashboard/live/camera-controls-card'
 import { CameraPreviewCard } from '@/components/faceguard/dashboard/live/camera-preview-card'
@@ -21,8 +21,16 @@ import { useLiveProcessing } from '@/lib/videos/use-live-processing'
  * presentational — mirroring the Upload Video panel's structure.
  */
 export function LiveCameraWorkspace() {
-  const camera = useLiveCamera()
   const outputCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  // Set during render below once protection state is known; the camera hook reads
+  // it lazily at record-start to choose the anonymized canvas over the raw feed.
+  // A ref breaks the camera → processing → camera value cycle.
+  const recordProcessedRef = useRef(false)
+
+  const camera = useLiveCamera({
+    processedCanvasRef: outputCanvasRef,
+    recordProcessedRef,
+  })
 
   const [filter, setFilter] = useState<LiveFilterForm>(defaultLiveFilterForm)
   const [showBoundingBox, setShowBoundingBox] = useState(true)
@@ -40,6 +48,15 @@ export function LiveCameraWorkspace() {
     showBoundingBox,
     showConfidence,
   })
+
+  // Protection is on AND at least one anonymized frame has painted — i.e. the
+  // canvas is showing protected output and is safe to record.
+  const showProcessed = protectionEnabled && processing.hasFrame
+
+  // Mirror into the ref the camera hook reads at record-start time.
+  useEffect(() => {
+    recordProcessedRef.current = showProcessed
+  }, [showProcessed])
 
   const filterSummary = useMemo(() => summarizeLiveFilter(filter), [filter])
 
@@ -64,7 +81,7 @@ export function LiveCameraWorkspace() {
         outputCanvasRef={outputCanvasRef}
         isStreaming={camera.isStreaming}
         isRecording={camera.isRecording}
-        showProcessed={protectionEnabled && processing.hasFrame}
+        showProcessed={showProcessed}
         processingStatus={processing.status}
         processingError={processing.error}
         fps={fps}
