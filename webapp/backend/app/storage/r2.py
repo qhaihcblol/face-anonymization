@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any, BinaryIO
+from urllib.parse import quote
 
 from app.storage.base import ObjectStat, Storage, StorageError
 
 if TYPE_CHECKING:
     from app.core.config import Settings
+
+
+def _content_disposition(filename: str) -> str:
+    """Build an RFC 6266 ``Content-Disposition`` value that forces a download.
+
+    Emits an ASCII ``filename`` fallback plus a UTF-8 ``filename*`` so names with
+    non-ASCII characters (e.g. Vietnamese) survive on modern browsers.
+    """
+    ascii_name = (
+        filename.encode("ascii", "ignore").decode("ascii").replace('"', "").strip()
+        or "download"
+    )
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -128,14 +143,18 @@ class R2Storage(Storage):
         self,
         key: str,
         expires_in: int | None = None,
+        download_filename: str | None = None,
     ) -> str:
         client = self._client_or_raise()
         expires = int(expires_in) if expires_in else self._presign_expiry_seconds
+        params: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
+        if download_filename:
+            params["ResponseContentDisposition"] = _content_disposition(download_filename)
         try:
             return await asyncio.to_thread(
                 client.generate_presigned_url,
                 "get_object",
-                Params={"Bucket": self._bucket, "Key": key},
+                Params=params,
                 ExpiresIn=expires,
             )
         except StorageError:

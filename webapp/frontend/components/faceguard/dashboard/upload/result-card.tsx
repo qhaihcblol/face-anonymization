@@ -27,10 +27,8 @@ const overlayMessage: Record<AnonymizationState['phase'], string> = {
 /** Right card: preview the protected output, follow live status, download result. */
 export function ResultCard({
   state,
-  downloadName,
 }: {
   state: AnonymizationState
-  downloadName: string
 }) {
   const { phase, uploadPercent, edit, resultUrl, error } = state
 
@@ -102,7 +100,7 @@ export function ResultCard({
                 asChild
                 className="w-full bg-cyan-400 text-cyan-950 hover:bg-cyan-300"
               >
-                <a href={resultUrl} download={downloadName} target="_blank" rel="noreferrer">
+                <a href={resultUrl} rel="noreferrer">
                   <Download className="size-4" />
                   Download protected video
                 </a>

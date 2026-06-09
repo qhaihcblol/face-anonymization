@@ -141,7 +141,9 @@ class VideoService:
         video_id: int,
     ) -> str:
         video = await self.get_video(db, user, video_id)
-        return await self.storage.generate_presigned_get_url(video.storage_key)
+        return await self.storage.generate_presigned_get_url(
+            video.storage_key, download_filename=video.original_filename
+        )
 
     # ------------------------------------------------------------------ #
     # Edits                                                               #
@@ -198,7 +200,11 @@ class VideoService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Edit output is not ready yet.",
             )
-        return await self.storage.generate_presigned_get_url(edit.output_storage_key)
+        video = await self.get_video(db, user, video_id)
+        return await self.storage.generate_presigned_get_url(
+            edit.output_storage_key,
+            download_filename=f"protected-{video.original_filename}",
+        )
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #

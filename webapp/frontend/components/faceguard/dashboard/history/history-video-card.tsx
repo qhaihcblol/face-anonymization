@@ -95,7 +95,6 @@ export function HistoryVideoCard({
         <div className="flex shrink-0 items-center gap-1">
           <DownloadButton
             getUrl={() => getVideoDownloadUrl(video.id)}
-            filename={video.original_filename}
             label="Download original video"
           />
           <DeleteVideoButton
@@ -158,7 +157,6 @@ export function HistoryVideoCard({
 
                   <DownloadButton
                     getUrl={() => getEditDownloadUrl(video.id, edit.id)}
-                    filename={`protected-${video.original_filename}`}
                     label="Download processed video"
                     disabled={edit.status !== 'completed'}
                     disabledHint={

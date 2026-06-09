@@ -46,8 +46,15 @@ class Storage(ABC):
         self,
         key: str,
         expires_in: int | None = None,
+        download_filename: str | None = None,
     ) -> str:
-        """Return a time-limited URL to download the object at ``key``."""
+        """Return a time-limited URL to download the object at ``key``.
+
+        When ``download_filename`` is given, the URL is signed so the storage host
+        responds with ``Content-Disposition: attachment``, making the browser save
+        the file under that name rather than display it inline — which is what lets a
+        cross-origin link download instead of opening in a new tab.
+        """
 
     @abstractmethod
     async def generate_presigned_put_url(

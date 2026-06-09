@@ -98,12 +98,7 @@ export function UploadVideoPanel() {
         onCancel={anonymization.cancel}
       />
 
-      <ResultCard
-        state={anonymization}
-        downloadName={
-          selectedFile ? `protected-${selectedFile.name}` : 'protected-video.mp4'
-        }
-      />
+      <ResultCard state={anonymization} />
     </div>
   )
 }

@@ -7,13 +7,12 @@ import { Button } from '@/components/ui/button'
 import { VideoApiError } from '@/lib/videos/client'
 import type { PresignedUrlResponse } from '@/lib/videos/types'
 
-/** Open a presigned URL as a download. Cross-origin (R2) links fall back to a new
- * tab when the browser ignores the `download` attribute — the user can still save. */
-function triggerDownload(url: string, filename: string): void {
+/** Navigate to a presigned URL to save the file. The backend signs the URL with
+ * `Content-Disposition: attachment` (and the real filename), so the browser
+ * downloads it rather than opening it — even though R2 is a different origin. */
+function startDownload(url: string): void {
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = filename
-  anchor.target = '_blank'
   anchor.rel = 'noreferrer'
   document.body.appendChild(anchor)
   anchor.click()
@@ -29,13 +28,11 @@ type DownloadStatus = 'idle' | 'loading' | 'error'
  */
 export function DownloadButton({
   getUrl,
-  filename,
   label,
   disabled = false,
   disabledHint,
 }: {
   getUrl: () => Promise<PresignedUrlResponse>
-  filename: string
   label: string
   disabled?: boolean
   disabledHint?: string
@@ -51,7 +48,7 @@ export function DownloadButton({
     setErrorMessage(null)
     try {
       const { url } = await getUrl()
-      triggerDownload(url, filename)
+      startDownload(url)
       setStatus('idle')
     } catch (error) {
       setErrorMessage(
