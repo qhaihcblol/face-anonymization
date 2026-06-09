@@ -27,7 +27,7 @@ export const visualMethodOptions: SelectOption<VisualMethod>[] = [
   { value: 'pixelate', label: 'Pixelate', description: 'Replace each face with coarse mosaic blocks.' },
   { value: 'mask', label: 'Mask', description: 'Cover the precise face region with a solid colour.' },
   { value: 'blackout', label: 'Blackout', description: 'Fill the detected face region with solid black.' },
-  { value: 'swap', label: 'Face Swap', description: 'Replace every face with the bundled source identity (BlendSwap).' },
+  { value: 'swap', label: 'Face Swap', description: 'Replace every face with a chosen source identity (BlendSwap).' },
   { value: 'none', label: 'None', description: 'Leave faces untouched — only audio / range settings run.' },
 ]
 
@@ -102,7 +102,7 @@ export const voiceMethodOptions: SelectOption<DspVoiceMethod>[] = [
   { value: 'pitch', label: 'Pitch shift', description: 'Shift the pitch up or down (semitones).' },
   { value: 'formant', label: 'Formant shift', description: 'Reshape the vocal-tract formants.' },
   { value: 'pitch_formant', label: 'Pitch + Formant', description: 'Combine pitch and formant shifting.' },
-  { value: 'convert', label: 'Voice conversion (AI)', description: 'kNN-VC toward the bundled reference voice (falls back to DSP if unavailable).' },
+  { value: 'convert', label: 'Voice conversion (AI)', description: 'kNN-VC toward a chosen target voice (falls back to DSP if unavailable).' },
 ]
 
 export function usesPitch(method: DspVoiceMethod): boolean {
@@ -237,11 +237,15 @@ export type ProtectionForm = {
   pixelationLevel: string
   maskColor: string
   drawBoxes: boolean
+  /** Selected source-face object key (Face Swap); null keeps the default identity. */
+  swapSourceKey: string | null
   audioMode: AudioMode
   voiceMethod: DspVoiceMethod
   mcadamsAlpha: string
   pitchSteps: string
   formantShift: string
+  /** Selected source-voice object key (Voice Conversion); null keeps the default. */
+  voiceReferenceKey: string | null
   targetFps: string
   startSec: string
   endSec: string
@@ -253,11 +257,13 @@ export const defaultProtectionForm: ProtectionForm = {
   pixelationLevel: '16',
   maskColor: '#A0A0A0',
   drawBoxes: false,
+  swapSourceKey: null,
   audioMode: 'keep',
   voiceMethod: 'mcadams',
   mcadamsAlpha: '0.8',
   pitchSteps: '-4',
   formantShift: '1.2',
+  voiceReferenceKey: null,
   targetFps: '',
   startSec: '',
   endSec: '',
@@ -311,16 +317,26 @@ export function buildEditPayload(
     return { payload: null, error: 'End time must be greater than start time.' }
   }
 
+  // Only send a selection when the method that consumes it is active, so a key left
+  // over from a since-changed method never travels (and never gets validated).
+  const swapSourceKey = form.visualMethod === 'swap' ? form.swapSourceKey : null
+  const voiceReferenceKey =
+    form.audioMode === 'anonymize' && form.voiceMethod === 'convert'
+      ? form.voiceReferenceKey
+      : null
+
   const payload: VideoEditCreate = {
     visual_method: form.visualMethod,
     blur_strength: parseNumber(form.blurStrength, 31),
     pixelation_level: parseNumber(form.pixelationLevel, 16),
     mask_color: form.maskColor,
     draw_boxes: form.drawBoxes,
+    swap_source_key: swapSourceKey,
     ...audioParams(form.audioMode, form.voiceMethod),
     mcadams_alpha: parseNumber(form.mcadamsAlpha, 0.8),
     pitch_steps: parseNumber(form.pitchSteps, -4),
     formant_shift: parseNumber(form.formantShift, 1.2),
+    voice_reference_key: voiceReferenceKey,
     target_fps: parseOptional(form.targetFps),
     start_sec: startSec,
     end_sec: endSec,

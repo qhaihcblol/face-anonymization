@@ -30,6 +30,8 @@ export type VideoEditCreate = {
   pixelation_level: number
   mask_color: string // #RRGGBB
   draw_boxes: boolean
+  /** Curated source-face key to swap onto every face (SWAP only); null = default. */
+  swap_source_key: string | null
   // Audio (voice)
   keep_audio: boolean
   anonymize_voice: boolean
@@ -37,10 +39,31 @@ export type VideoEditCreate = {
   mcadams_alpha: number
   pitch_steps: number
   formant_shift: number
+  /** Curated source-voice key to convert toward (CONVERT only); null = default. */
+  voice_reference_key: string | null
   // Processing range
   target_fps: number | null
   start_sec: number | null
   end_sec: number | null
+}
+
+/** Which catalog a {@link SourceAsset} belongs to. */
+export type SourceAssetKind = 'face' | 'voice'
+
+/**
+ * One curated, selectable asset (a face image or a voice clip), from
+ * `GET /api/sources/faces` or `/voices`. `key` is the stable id passed back into a
+ * `VideoEditCreate`; `url` is a short-lived presigned link used only to preview it.
+ */
+export type SourceAsset = {
+  kind: SourceAssetKind
+  key: string
+  name: string
+  gender: string | null
+  url: string
+  content_type: string | null
+  size_bytes: number
+  expires_in: number
 }
 
 /** A source video the user uploaded. */

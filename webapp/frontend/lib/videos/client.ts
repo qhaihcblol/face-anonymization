@@ -7,6 +7,7 @@
 
 import type {
   PresignedUrlResponse,
+  SourceAsset,
   VideoEditCreate,
   VideoEditPublic,
   VideoPublic,
@@ -16,6 +17,7 @@ import type {
 } from '@/lib/videos/types'
 
 const BASE_PATH = '/api/videos'
+const SOURCES_BASE_PATH = '/api/sources'
 
 export class VideoApiError extends Error {
   status: number
@@ -58,10 +60,14 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function requestJson<T>(
+  path: string,
+  init?: RequestInit,
+  basePath: string = BASE_PATH,
+): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${BASE_PATH}${path}`, {
+    response = await fetch(`${basePath}${path}`, {
       ...init,
       headers: {
         Accept: 'application/json',
@@ -78,6 +84,16 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new VideoApiError(response.status, messageFromBody(body, response.status))
   }
   return body as T
+}
+
+// --- Source asset catalogs (curated faces & voices) ------------------------ //
+
+export function listSourceFaces(): Promise<SourceAsset[]> {
+  return requestJson<SourceAsset[]>('/faces', undefined, SOURCES_BASE_PATH)
+}
+
+export function listSourceVoices(): Promise<SourceAsset[]> {
+  return requestJson<SourceAsset[]>('/voices', undefined, SOURCES_BASE_PATH)
 }
 
 // --- Edits + downloads (JSON) ---------------------------------------------- //

@@ -19,6 +19,10 @@ import {
   SettingsSection,
 } from '@/components/faceguard/dashboard/upload/settings-section'
 import {
+  SourceFacePicker,
+  SourceVoicePicker,
+} from '@/components/faceguard/dashboard/upload/source-asset-picker'
+import {
   audioModeOptions,
   usesFormant,
   usesPitch,
@@ -26,6 +30,7 @@ import {
   voiceMethodOptions,
   type ProtectionForm,
 } from '@/lib/videos/options'
+import { useSourceAssets } from '@/lib/videos/use-source-assets'
 
 type FormPatch = Partial<ProtectionForm>
 
@@ -51,6 +56,11 @@ export function ProtectionSettingsCard({
 }) {
   const isSwap = form.visualMethod === 'swap'
   const isAnonymizeVoice = form.audioMode === 'anonymize'
+  const isVoiceConvert = isAnonymizeVoice && form.voiceMethod === 'convert'
+
+  // Load each catalog only once the user actually picks the method that uses it.
+  const faceAssets = useSourceAssets('face', isSwap)
+  const voiceAssets = useSourceAssets('voice', isVoiceConvert)
 
   return (
     <Card className="border-cyan-300/30 bg-background/75 backdrop-blur-sm">
@@ -104,6 +114,14 @@ export function ProtectionSettingsCard({
               value={form.maskColor}
               onChange={(maskColor) => onChange({ maskColor })}
               hint="Solid fill drawn over the detected face region."
+            />
+          )}
+
+          {isSwap && (
+            <SourceFacePicker
+              state={faceAssets}
+              selectedKey={form.swapSourceKey}
+              onSelect={(swapSourceKey) => onChange({ swapSourceKey })}
             />
           )}
 
@@ -188,6 +206,14 @@ export function ProtectionSettingsCard({
                 />
               )}
             </div>
+          )}
+
+          {isVoiceConvert && (
+            <SourceVoicePicker
+              state={voiceAssets}
+              selectedKey={form.voiceReferenceKey}
+              onSelect={(voiceReferenceKey) => onChange({ voiceReferenceKey })}
+            />
           )}
         </SettingsSection>
 
