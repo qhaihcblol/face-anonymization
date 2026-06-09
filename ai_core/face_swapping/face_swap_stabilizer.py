@@ -121,10 +121,14 @@ class FaceSwapStabilizer:
         mask_smooth: float = 0.5,
         iou_threshold: float = 0.3,
         max_missed: int = 8,
+        source_blob: np.ndarray | None = None,
     ) -> None:
         self.detector = detector
         self.swapper = swapper
         self.aligner: FaceAligner = swapper.target_aligner
+        # Identity pasted onto every face for this run (None = swapper's default).
+        # Held for the whole run since the identity is constant across frames.
+        self.source_blob = source_blob
         self.freq = float(freq)
         self.min_cutoff = float(min_cutoff)
         self.beta = float(beta)
@@ -171,7 +175,9 @@ class FaceSwapStabilizer:
                 ),
             )
             aligned = self.aligner.align_detection(detection)
-            swapped_crop, mask = self.swapper.swap_aligned(frame_rgb, aligned)
+            swapped_crop, mask = self.swapper.swap_aligned(
+                frame_rgb, aligned, self.source_blob
+            )
 
             # Smoothing is valid because landmarks are filtered, so consecutive crops
             # and masks are registered to the same aligned template.

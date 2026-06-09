@@ -89,10 +89,23 @@ class AnonymizationPipeline:
         source_path: str,
         output_path: str,
         params: dict[str, Any],
+        *,
+        swap_source_path: str | None = None,
+        voice_reference_path: str | None = None,
     ) -> None:
-        """Render an anonymized copy of ``source_path`` to ``output_path`` (blocking)."""
+        """Render an anonymized copy of ``source_path`` to ``output_path`` (blocking).
+
+        ``swap_source_path`` / ``voice_reference_path`` are local files the caller has
+        already fetched for the selected face / voice. When ``None`` the engine uses
+        its bundled defaults. They are passed as values into ai_core's option objects,
+        so the shared engine can serve concurrent edits with different identities.
+        """
         engine = self._engine_or_build()
-        visual, audio = self._build_options(params)
+        visual, audio = self._build_options(
+            params,
+            swap_source_path=swap_source_path,
+            voice_reference_path=voice_reference_path,
+        )
         engine.anonymize_video(
             input_path=source_path,
             output_path=output_path,
@@ -249,12 +262,18 @@ class AnonymizationPipeline:
     # Params -> ai_core options                                           #
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _build_options(params: dict[str, Any]) -> tuple[Any, Any]:
+    def _build_options(
+        params: dict[str, Any],
+        *,
+        swap_source_path: str | None = None,
+        voice_reference_path: str | None = None,
+    ) -> tuple[Any, Any]:
         """Translate the persisted edit ``params`` into ai_core option objects.
 
         ``params`` is the JSON-serialized :class:`VideoEditCreate`, so every key is
         present with a validated value; ``.get(..., default)`` is belt-and-braces for
-        rows created before a field existed.
+        rows created before a field existed. The selected face/voice arrive as local
+        file paths (already fetched by the caller), not as keys.
         """
         _ensure_ai_core_importable()
         from ai_core.video_anonymization import (
@@ -268,8 +287,9 @@ class AnonymizationPipeline:
         method = str(params.get("visual_method", "blur")).strip().lower()
         if method == "swap":
             # Face swap has its own (model) option object; the obfuscation knobs and
-            # the box overlay do not apply to it.
-            visual: Any = SwapOptions()
+            # the box overlay do not apply to it. ``source_face_path=None`` keeps the
+            # engine's bundled default identity.
+            visual: Any = SwapOptions(source_face_path=swap_source_path)
         else:
             visual = VisualOptions(
                 method=method,
@@ -290,5 +310,7 @@ class AnonymizationPipeline:
                 pitch_steps=float(params.get("pitch_steps", -4.0)),
                 formant_shift=float(params.get("formant_shift", 1.2)),
             ),
+            # Only the CONVERT method consumes this; None keeps the bundled default.
+            voice_reference_path=voice_reference_path,
         )
         return visual, audio

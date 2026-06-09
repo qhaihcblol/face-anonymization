@@ -114,6 +114,7 @@ class VoiceAnonymizer:
         sample_rate: int,
         method: VoiceAnonymizationMethod | str = VoiceAnonymizationMethod.MCADAMS,
         params: VoiceParams | None = None,
+        matching_set: np.ndarray | None = None,
     ) -> np.ndarray:
         """Anonymize ``waveform`` and return it with the same shape, rate and length.
 
@@ -125,6 +126,9 @@ class VoiceAnonymizer:
                 delegates to the configured :class:`VoiceConverter`.
             params: Overrides this instance's default :class:`VoiceParams` for this
                 call only; ``None`` uses the instance defaults. Ignored by ``CONVERT``.
+            matching_set: ``CONVERT`` only — the reference identity from
+                ``VoiceConverter.prepare_reference``. ``None`` uses the converter's
+                bundled default reference. Ignored by the DSP methods.
 
         Returns:
             The processed waveform, same dtype/shape/length as the input.
@@ -158,7 +162,7 @@ class VoiceAnonymizer:
             return audio.copy()
 
         if method_value is VoiceAnonymizationMethod.CONVERT:
-            out_2d = self._convert(audio_2d, sample_rate)
+            out_2d = self._convert(audio_2d, sample_rate, matching_set)
         else:
             channels = [
                 self._anonymize_channel(
@@ -324,14 +328,19 @@ class VoiceAnonymizer:
         norm[norm < 1e-8] = 1.0
         return (out[: y.shape[0]] / norm[: y.shape[0]]).astype(np.float32)
 
-    def _convert(self, audio_2d: np.ndarray, sample_rate: int) -> np.ndarray:
+    def _convert(
+        self,
+        audio_2d: np.ndarray,
+        sample_rate: int,
+        matching_set: np.ndarray | None = None,
+    ) -> np.ndarray:
         if self.voice_converter is None:
             raise RuntimeError(
                 "CONVERT requires a VoiceConverter. Construct VoiceAnonymizer with "
                 "voice_converter=VoiceConverter(encoder_onnx_path=..., "
                 "vocoder_onnx_path=...)."
             )
-        converted = self.voice_converter.convert(audio_2d, sample_rate)
+        converted = self.voice_converter.convert(audio_2d, sample_rate, matching_set)
         converted = np.asarray(converted, dtype=np.float32)
         if converted.ndim == 1:
             converted = converted[:, None]

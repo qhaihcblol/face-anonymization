@@ -4,7 +4,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import quote
 
-from app.storage.base import ObjectStat, Storage, StorageError
+from app.storage.base import ObjectInfo, ObjectStat, Storage, StorageError
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -187,6 +187,34 @@ class R2Storage(Storage):
             raise StorageError(
                 f"Failed to presign upload URL for '{key}': {exc}"
             ) from exc
+
+    async def list_objects(self, prefix: str) -> list[ObjectInfo]:
+        client = self._client_or_raise()
+        try:
+            pages = await asyncio.to_thread(self._list_all_pages, client, prefix)
+        except StorageError:
+            raise
+        except Exception as exc:  # botocore.ClientError and friends
+            raise StorageError(
+                f"Failed to list objects under '{prefix}' in R2: {exc}"
+            ) from exc
+
+        objects: list[ObjectInfo] = []
+        for entry in pages:
+            key = str(entry.get("Key", ""))
+            # Skip the zero-byte "directory marker" some clients create for a prefix.
+            if not key or key == prefix or key.endswith("/"):
+                continue
+            objects.append(ObjectInfo(key=key, size_bytes=int(entry.get("Size", 0))))
+        return objects
+
+    def _list_all_pages(self, client: Any, prefix: str) -> list[dict[str, Any]]:
+        """Walk every page of ``list_objects_v2`` (blocking; runs in a worker thread)."""
+        paginator = client.get_paginator("list_objects_v2")
+        contents: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            contents.extend(page.get("Contents", []))
+        return contents
 
     async def head(self, key: str) -> ObjectStat | None:
         client = self._client_or_raise()

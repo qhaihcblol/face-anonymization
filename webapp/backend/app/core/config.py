@@ -34,6 +34,18 @@ class Settings(BaseSettings):
     video_max_upload_mb: int = 2048
     video_allowed_extensions: list[str] = [".mp4", ".mov", ".webm", ".mkv", ".avi"]
 
+    # --- Source asset catalogs (curated faces & voices the user picks from) ---
+    # Object-key prefixes under which the shared, read-only assets live in R2.
+    source_faces_prefix: str = "source_faces/"
+    source_voices_prefix: str = "source_voices/"
+    # Only these extensions are surfaced from each catalog (anything else — e.g. a
+    # stray README or directory marker — is ignored).
+    source_face_extensions: list[str] = [".jpg", ".jpeg", ".png", ".webp"]
+    source_voice_extensions: list[str] = [".wav", ".mp3", ".m4a", ".ogg", ".flac"]
+    # The catalogs change rarely, so the object listing is cached this long to avoid
+    # an R2 round-trip on every request. Presigned URLs are still minted fresh.
+    source_assets_cache_ttl_seconds: int = 300
+
     # --- Anonymization pipeline (ai_core) ---
     # Optional override for the RetinaFace detector weights; defaults to the model
     # bundled inside the ai_core package when unset.
@@ -75,7 +87,12 @@ class Settings(BaseSettings):
             return [item.strip() for item in raw_value.split(",") if item.strip()]
         return value
 
-    @field_validator("video_allowed_extensions", mode="before")
+    @field_validator(
+        "video_allowed_extensions",
+        "source_face_extensions",
+        "source_voice_extensions",
+        mode="before",
+    )
     @classmethod
     def parse_video_extensions(cls, value: str | list[str]) -> str | list[str]:
         if isinstance(value, str):
@@ -156,13 +173,25 @@ class Settings(BaseSettings):
             )
         )
 
-    @property
-    def resolved_video_allowed_extensions(self) -> set[str]:
+    @staticmethod
+    def _normalize_extensions(extensions: list[str]) -> set[str]:
         return {
             f".{ext.lower().lstrip('.')}"
-            for ext in self.video_allowed_extensions
+            for ext in extensions
             if ext and ext.strip()
         }
+
+    @property
+    def resolved_video_allowed_extensions(self) -> set[str]:
+        return self._normalize_extensions(self.video_allowed_extensions)
+
+    @property
+    def resolved_source_face_extensions(self) -> set[str]:
+        return self._normalize_extensions(self.source_face_extensions)
+
+    @property
+    def resolved_source_voice_extensions(self) -> set[str]:
+        return self._normalize_extensions(self.source_voice_extensions)
 
     @property
     def video_max_upload_bytes(self) -> int:

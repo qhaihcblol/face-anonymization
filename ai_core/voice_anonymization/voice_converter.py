@@ -94,8 +94,11 @@ class VoiceConverter:
         self.vocoder_input = str(self.vocoder.get_inputs()[0].name)
         self.vocoder_output = str(self.vocoder.get_outputs()[0].name)
 
-        # Raw reference features (N_ref, D); built lazily by prepare_reference().
-        self._matching_set: np.ndarray | None = None
+        # Raw reference features (N_ref, D) for the *default* reference voice, built
+        # lazily by default_reference(). A per-call matching set is never stored here —
+        # it is passed into convert() — so one converter can serve concurrent runs with
+        # different reference identities without races.
+        self._default_matching_set: np.ndarray | None = None
         # librosa is only needed to decode the reference wav from disk.
         self._librosa_module: Any = None
 
@@ -125,40 +128,59 @@ class VoiceConverter:
 
     def prepare_reference(
         self,
-        reference: np.ndarray | None = None,
+        reference: np.ndarray | str | Path | None = None,
         sample_rate: int | None = None,
     ) -> np.ndarray:
-        """Encode the reference voice into the kNN matching set (cached).
+        """Encode a reference voice into a kNN matching set, and *return* it.
 
-        Mirrors ``FaceSwapper.prepare_source``: when ``reference`` is omitted the wav
-        at ``reference_voice_path`` is loaded and resampled to 16 kHz. Pass an
-        in-memory ``reference`` (with its ``sample_rate``) to override the file.
+        Mirrors ``FaceSwapper.prepare_source``: ``reference`` may be a wav path, an
+        in-memory waveform (with its ``sample_rate``), or ``None`` to load the
+        configured ``reference_voice_path``. The matching set is *returned, not
+        cached* on the instance, so one converter (sharing the heavy ONNX sessions)
+        can convert toward a different identity per call/run without races: pass the
+        returned set to :meth:`convert`. For the bundled default reference use
+        :meth:`default_reference`, which caches it.
 
         Returns the ``(N_ref, D)`` matching set.
         """
         if reference is None:
             mono = self._load_reference(self.reference_voice_path)
+            origin: Any = self.reference_voice_path
+        elif isinstance(reference, (str, Path)):
+            mono = self._load_reference(reference)
+            origin = reference
         else:
             if sample_rate is None:
                 raise ValueError(
                     "sample_rate is required when passing a reference array"
                 )
             mono = self._to_mono_16k(reference, sample_rate)
+            origin = "<provided array>"
 
         features = self._encode(mono)
         if features.shape[0] == 0:
-            raise ValueError(
-                f"Reference voice produced no features: {self.reference_voice_path}"
-            )
-        self._matching_set = features
+            raise ValueError(f"Reference voice produced no features: {origin}")
         return features
 
-    def convert(self, waveform: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Convert ``waveform`` to the reference identity, preserving length.
+    def default_reference(self) -> np.ndarray:
+        """The matching set for the configured reference voice, built once and cached."""
+        if self._default_matching_set is None:
+            self._default_matching_set = self.prepare_reference()
+        return self._default_matching_set
+
+    def convert(
+        self,
+        waveform: np.ndarray,
+        sample_rate: int,
+        matching_set: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Convert ``waveform`` to a reference identity, preserving length.
 
         Args:
             waveform: float32 array ``(n_samples,)`` or ``(n_samples, channels)``.
             sample_rate: Sample rate of ``waveform`` in Hz.
+            matching_set: Reference identity from :meth:`prepare_reference`. ``None``
+                uses the bundled default reference (:meth:`default_reference`).
 
         Returns:
             The converted waveform, same shape and length as the input. Multi-channel
@@ -183,12 +205,11 @@ class VoiceConverter:
         if n_samples == 0:
             return waveform if was_1d else audio
 
-        if self._matching_set is None:
-            self.prepare_reference()
+        reference = matching_set if matching_set is not None else self.default_reference()
 
         mono_16k = self._to_mono_16k(audio, sample_rate)
         features = self._encode(mono_16k)                  # (T, D)
-        converted = self._knn(features, self._matching_set)  # (T, D)
+        converted = self._knn(features, reference)         # (T, D)
         wav_16k = self._vocode(converted)                  # (n_out,)
 
         out_mono = self._resample(wav_16k, TARGET_SAMPLE_RATE, sample_rate)
@@ -225,7 +246,8 @@ class VoiceConverter:
         neighbours = matching_set[top_idx]                   # (T, k, D)
         return neighbours.mean(axis=1).astype(np.float32)
 
-    def _load_reference(self, path: Path) -> np.ndarray:
+    def _load_reference(self, path: str | Path) -> np.ndarray:
+        path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(
                 f"Reference voice not found: {path}. Add a reference_voice.wav (the "

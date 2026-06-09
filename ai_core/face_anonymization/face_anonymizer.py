@@ -359,13 +359,15 @@ class FaceAnonymizer:
         self,
         image: np.ndarray,
         aligned_faces: Sequence["AlignedFace"],
+        source_blob: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Replace every aligned face in ``image`` with the source identity.
+        """Replace every aligned face in ``image`` with a source identity.
 
         Uses the BlendSwap (blendface) model via the configured
-        :class:`~ai_core.face_swapping.face_swapper.FaceSwapper`. The source
-        identity is taken from ``source_img.png`` and ``aligned_faces`` are the
-        target faces (as produced by ``FaceAligner``).
+        :class:`~ai_core.face_swapping.face_swapper.FaceSwapper`. ``aligned_faces`` are
+        the target faces (as produced by ``FaceAligner``); ``source_blob`` selects the
+        identity to paste (from ``FaceSwapper.prepare_source``), or ``None`` for the
+        swapper's bundled default (``source_img.png``).
         """
         if self.face_swapper is None:
             raise RuntimeError(
@@ -376,7 +378,7 @@ class FaceAnonymizer:
             raise TypeError("image must be numpy.ndarray")
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("image must have shape (H, W, 3)")
-        return self.face_swapper.swap_face(image, aligned_faces)
+        return self.face_swapper.swap_face(image, aligned_faces, source_blob)
 
     def anonymize(
         self,

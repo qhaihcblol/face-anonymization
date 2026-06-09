@@ -85,40 +85,58 @@ class FaceSwapper:
         self.session = self._create_session(providers, intra_op_num_threads)
         self._source_input_name, self._target_input_name = self._resolve_input_names()
 
-        # Lazily prepared identity tensor (1, 3, 112, 112).
-        self._source_blob: np.ndarray | None = None
+        # Lazily prepared identity tensor (1, 3, 112, 112) for the *default* source
+        # (``self.source_path``). A per-call identity is never stored here — it is
+        # passed in as ``source_blob`` — so one swapper can serve concurrent runs with
+        # different identities without races.
+        self._default_source_blob: np.ndarray | None = None
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def prepare_source(self, source_image: np.ndarray | None = None) -> np.ndarray:
-        """Detect and align the identity face, returning the cached source blob.
+    def prepare_source(
+        self, source_image: np.ndarray | str | Path | None = None
+    ) -> np.ndarray:
+        """Detect and align an identity face, returning its (1, 3, 112, 112) blob.
 
-        ``source_image`` is expected in RGB. When ``None`` the image referenced by
-        ``self.source_path`` is loaded (and converted BGR->RGB).
+        ``source_image`` may be an RGB array, a path to an image file, or ``None`` to
+        load the swapper's configured ``source_path``. The blob is *returned, not
+        cached* on the instance, so a single swapper (sharing the heavy ONNX session)
+        can swap a different identity per call/run without races: pass the returned
+        blob to :meth:`swap_face` / :meth:`swap_aligned`. For the bundled default
+        identity use :meth:`default_source`, which caches it.
         """
         if source_image is None:
-            bgr = cv2.imread(str(self.source_path))
-            if bgr is None:
-                raise FileNotFoundError(f"Cannot read source image: {self.source_path}")
-            source_image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            origin: Any = self.source_path
+            source_image = self._read_image(self.source_path)
+        elif isinstance(source_image, (str, Path)):
+            origin = source_image
+            source_image = self._read_image(source_image)
+        else:
+            origin = "<provided image>"
 
         source_image = self._ensure_rgb_uint8(source_image)
         detections = self.detector.detect(source_image)
         if not detections:
-            raise ValueError(f"No face detected in source image: {self.source_path}")
+            raise ValueError(f"No face detected in source image: {origin}")
 
         best = max(detections, key=lambda det: det.score)
         _, crop = self.source_aligner.align_and_warp(source_image, best)
-        self._source_blob = self._to_blob(crop)
-        return self._source_blob
+        return self._to_blob(crop)
+
+    def default_source(self) -> np.ndarray:
+        """The identity blob for the configured ``source_path``, built once and cached."""
+        if self._default_source_blob is None:
+            self._default_source_blob = self.prepare_source()
+        return self._default_source_blob
 
     def swap_face(
         self,
         image: np.ndarray,
         aligned_faces: Sequence[AlignedFace],
+        source_blob: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Swap every aligned face in ``image`` with the source identity.
+        """Swap every aligned face in ``image`` with a source identity.
 
         Parameters
         ----------
@@ -128,6 +146,9 @@ class FaceSwapper:
             Faces to replace, as produced by :class:`FaceAligner`. Each carries the
             affine ``matrix`` and aligned ``landmarks`` used to recover the original
             5-point landmarks, so any aligner mode/size is accepted.
+        source_blob:
+            Identity to paste, from :meth:`prepare_source`. ``None`` uses the bundled
+            default identity (:meth:`default_source`).
 
         Returns
         -------
@@ -138,9 +159,7 @@ class FaceSwapper:
         if not aligned_faces:
             return image.copy()
 
-        source_blob = self._source_blob
-        if source_blob is None:
-            source_blob = self.prepare_source()
+        blob = source_blob if source_blob is not None else self.default_source()
 
         output = image.copy()
         for aligned in aligned_faces:
@@ -149,7 +168,7 @@ class FaceSwapper:
             target_aligned = self.target_aligner.align_detection(
                 self._recover_detection(aligned)
             )
-            swapped_crop, mask = self.swap_aligned(image, target_aligned)
+            swapped_crop, mask = self.swap_aligned(image, target_aligned, blob)
             output = self.paste_back(output, swapped_crop, target_aligned.matrix, mask)
         return output
 
@@ -157,20 +176,20 @@ class FaceSwapper:
         self,
         image: np.ndarray,
         aligned: AlignedFace,
+        source_blob: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Swap a single face; return ``(swapped_crop, blend_mask)`` in 256x256 space.
 
         ``aligned.matrix`` must come from this swapper's ``target_aligner`` (FFHQ 256).
+        ``source_blob`` is the identity to paste (``None`` = the bundled default).
         Exposed (and returning the mask alongside the crop) so callers such as the
         temporal stabilizer can post-process the aligned crop before pasting it back.
         """
         image = self._ensure_rgb_uint8(image)
-        source_blob = self._source_blob
-        if source_blob is None:
-            source_blob = self.prepare_source()
+        blob = source_blob if source_blob is not None else self.default_source()
 
         target_crop = self.target_aligner.warp_face(image, aligned.matrix)
-        swapped_crop = self._run_model(source_blob, target_crop)
+        swapped_crop = self._run_model(blob, target_crop)
         # Restore detail before matching color, so the final tone follows the target.
         if self.face_restorer is not None:
             swapped_crop = self.face_restorer.restore(swapped_crop)
@@ -339,6 +358,14 @@ class FaceSwapper:
     # ------------------------------------------------------------------ #
     # Setup helpers
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _read_image(path: str | Path) -> np.ndarray:
+        """Load an image file as an RGB array (OpenCV reads BGR)."""
+        bgr = cv2.imread(str(path))
+        if bgr is None:
+            raise FileNotFoundError(f"Cannot read source image: {path}")
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
     @staticmethod
     def _ensure_rgb_uint8(image: np.ndarray) -> np.ndarray:
         if not isinstance(image, np.ndarray):

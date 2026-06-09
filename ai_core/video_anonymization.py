@@ -116,6 +116,9 @@ class SwapOptions:
     :class:`FaceAnonymizer` to be configured with a ``FaceSwapper``.
     """
 
+    # Identity to swap onto every detected face. None -> the FaceSwapper's bundled
+    # default (source_img.png); a path to an image file swaps a different identity.
+    source_face_path: str | Path | None = None
     # Smooth the swap across frames instead of an independent per-frame swap.
     stabilize: bool = True
     # 'online' = causal 1-Euro landmark smoothing; 'offline' = 2-pass zero-phase.
@@ -165,6 +168,9 @@ class AudioOptions:
     # Per-run DSP strengths (mcadams alpha / pitch steps / formant shift / stft).
     # None -> use the VoiceAnonymizer instance's own configured defaults.
     voice: VoiceParams | None = None
+    # CONVERT only: reference identity to convert toward. None -> the VoiceConverter's
+    # bundled default (reference_voice.wav); a path to a wav uses a different voice.
+    voice_reference_path: str | Path | None = None
 
     @property
     def mode(self) -> AudioMode:
@@ -396,8 +402,14 @@ class VideoAnonymization:
         assert swapper is not None  # guaranteed by _prepare_context
         output_smooth = options.resolved_output_smooth
 
-        # Prepare the source identity once up-front so any source issues surface early.
-        swapper.prepare_source()
+        # Resolve the source identity once up-front (so any source issue surfaces
+        # before the first frame) and thread it explicitly through the swap calls. The
+        # swapper is shared across runs, so the identity must travel as a value, never
+        # as mutable instance state.
+        if options.source_face_path is None:
+            source_blob = swapper.default_source()
+        else:
+            source_blob = swapper.prepare_source(options.source_face_path)
 
         def _make_source_frames() -> Iterator[np.ndarray]:
             return self.video_io.iter_frames(
@@ -413,6 +425,7 @@ class VideoAnonymization:
                 swapper=swapper,
                 output_smooth=output_smooth,
                 mask_smooth=options.mask_smooth,
+                source_blob=source_blob,
             )
             print("Pass 1/2: detecting + tracking faces across the clip...")
             pass1_count = 0
@@ -445,12 +458,14 @@ class VideoAnonymization:
                 beta=options.smooth_beta,
                 output_smooth=output_smooth,
                 mask_smooth=options.mask_smooth,
+                source_blob=source_blob,
             )
         return self._iter_swapped_frames(
             frames=_make_source_frames(),
             aligner=aligner,
             progress_every=context.progress_every,
             stabilizer=stabilizer,
+            source_blob=source_blob,
         )
 
     def _iter_processed_frames(
@@ -517,6 +532,7 @@ class VideoAnonymization:
         aligner: FaceAligner,
         progress_every: int,
         stabilizer: FaceSwapStabilizer | None = None,
+        source_blob: np.ndarray | None = None,
     ) -> Iterator[np.ndarray]:
         # Face swap needs fresh 5-point landmarks every frame, so the detector runs
         # on each frame (the Kalman tracker only predicts bboxes, not landmarks).
@@ -538,7 +554,7 @@ class VideoAnonymization:
                     # VideoIO yields BGR; BlendSwap operates in RGB.
                     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                     swapped_rgb = self.face_anonymizer.swap_face(
-                        frame_rgb, aligned_faces
+                        frame_rgb, aligned_faces, source_blob
                     )
                     output_frame = cv2.cvtColor(swapped_rgb, cv2.COLOR_RGB2BGR)
                 else:
@@ -626,11 +642,23 @@ class VideoAnonymization:
             start_sec=context.start_sec,
             end_sec=context.end_sec,
         )
+        # Resolve the reference identity for CONVERT once, here, mirroring how the
+        # visual path resolves the swap source — the converter is shared, so the
+        # matching set travels as a value, not as mutable instance state. Only build
+        # it when a custom reference is supplied; otherwise the converter falls back to
+        # its cached default (and the DSP methods ignore it entirely).
+        matching_set = None
+        reference_path = context.audio.voice_reference_path
+        if reference_path is not None and self.voice_anonymizer.voice_converter is not None:
+            matching_set = self.voice_anonymizer.voice_converter.prepare_reference(
+                reference_path
+            )
         processed = self.voice_anonymizer.process(
             waveform,
             sample_rate,
             method=context.audio.voice_method,
             params=context.audio.voice,
+            matching_set=matching_set,
         )
         work_dir = stack.enter_context(tempfile.TemporaryDirectory())
         wav_path = Path(work_dir) / "voice_anonymized.wav"

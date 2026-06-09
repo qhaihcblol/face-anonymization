@@ -10,6 +10,7 @@ from app.core.security import decode_access_token
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
+from app.services.source_asset_service import SourceAssetService
 from app.services.video_service import VideoService
 from app.utils.exceptions import AppException
 
@@ -53,5 +54,15 @@ def get_video_service(request: Request) -> VideoService:
         raise AppException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Video service is not ready. Please retry shortly.",
+        )
+    return service
+
+
+def get_source_asset_service(request: Request) -> SourceAssetService:
+    service = getattr(request.app.state, "source_asset_service", None)
+    if service is None:
+        raise AppException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Source asset service is not ready. Please retry shortly.",
         )
     return service

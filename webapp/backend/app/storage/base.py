@@ -21,6 +21,19 @@ class ObjectStat:
     content_type: str | None = None
 
 
+@dataclass(frozen=True)
+class ObjectInfo:
+    """One entry of a :meth:`Storage.list_objects` listing.
+
+    ``content_type`` is intentionally absent: the bulk ``list`` operation does not
+    return it (only a per-object ``head`` does), so callers derive it from the key's
+    extension instead of paying one ``head`` request per object.
+    """
+
+    key: str
+    size_bytes: int
+
+
 class Storage(ABC):
     """Abstract object-storage backend (S3 / Cloudflare R2 / ...).
 
@@ -67,6 +80,15 @@ class Storage(ABC):
         Lets the browser upload straight to object storage, so large files never pass
         through the application servers. Only the bucket + key are signed, so the
         client may send a ``Content-Type`` header without breaking the signature.
+        """
+
+    @abstractmethod
+    async def list_objects(self, prefix: str) -> list[ObjectInfo]:
+        """List every object whose key starts with ``prefix``.
+
+        Zero-byte "directory marker" objects (the key equal to ``prefix`` itself, or
+        any key ending in ``/``) are filtered out, so the result only holds real
+        files. Pagination is handled inside the implementation.
         """
 
     @abstractmethod

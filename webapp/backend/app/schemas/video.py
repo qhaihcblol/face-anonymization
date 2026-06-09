@@ -47,6 +47,10 @@ class VideoEditCreate(BaseModel):
     mask_color: str = Field(default="#A0A0A0", pattern=r"^#?[0-9a-fA-F]{6}$")
     # Overlay tracker boxes on the output (ignored for the SWAP method).
     draw_boxes: bool = False
+    # Object key of the source face to swap onto every face, from GET /sources/faces.
+    # Only used when ``visual_method`` is SWAP; ``None`` keeps the engine's default
+    # identity. Validated server-side to be a real curated face asset.
+    swap_source_key: str | None = Field(default=None, max_length=512)
 
     # --- Audio (voice) ---
     keep_audio: bool = True
@@ -58,6 +62,10 @@ class VideoEditCreate(BaseModel):
     pitch_steps: float = Field(default=-4.0, ge=-12.0, le=12.0)
     # Formant scale; > 1 raises formants, < 1 lowers them.
     formant_shift: float = Field(default=1.2, gt=0, le=3.0)
+    # Object key of the source voice to convert toward, from GET /sources/voices. Only
+    # used when ``anonymize_voice`` and ``voice_method`` is CONVERT; ``None`` keeps the
+    # engine's default reference. Validated server-side to be a real curated voice.
+    voice_reference_key: str | None = Field(default=None, max_length=512)
 
     # --- Processing range ---
     # Downsample to this FPS (never upsamples); ``None`` keeps the source rate.

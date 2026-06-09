@@ -18,6 +18,8 @@ from app.schemas.video import (
     VideoUploadComplete,
     VideoUploadInit,
     VideoUploadTicket,
+    VisualMethod,
+    VoiceMethod,
 )
 from app.storage.base import Storage, StorageError
 from app.utils.exceptions import AppException
@@ -159,10 +161,12 @@ class VideoService:
         payload: VideoEditCreate,
     ) -> VideoEdit:
         video = await self.get_video(db, user, video_id)
+        # Reject a bad face/voice selection here so a forged/stale key fails fast with
+        # a 4xx instead of surfacing as a failed background edit.
+        await self._validate_source_selection(payload)
         edit = await VideoEditRepository.create(
             db, video_id=video.id, params=payload.model_dump(mode="json")
         )
-        # Hand off to the processing seam (stub for now; ai_core wired in later).
         await self.processor.submit(edit)
         return edit
 
@@ -212,6 +216,57 @@ class VideoService:
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
     # ------------------------------------------------------------------ #
+    async def _validate_source_selection(self, payload: VideoEditCreate) -> None:
+        """Validate any face/voice selection that this edit will actually consume.
+
+        Only the key the chosen method uses is checked, so an irrelevant (e.g. stale)
+        selection left in the payload never blocks the edit.
+        """
+        if payload.visual_method is VisualMethod.SWAP and payload.swap_source_key:
+            await self._ensure_source_asset(
+                payload.swap_source_key,
+                prefix=settings.source_faces_prefix,
+                allowed_extensions=settings.resolved_source_face_extensions,
+                label="face",
+            )
+        if (
+            payload.anonymize_voice
+            and payload.voice_method is VoiceMethod.CONVERT
+            and payload.voice_reference_key
+        ):
+            await self._ensure_source_asset(
+                payload.voice_reference_key,
+                prefix=settings.source_voices_prefix,
+                allowed_extensions=settings.resolved_source_voice_extensions,
+                label="voice",
+            )
+
+    async def _ensure_source_asset(
+        self,
+        key: str,
+        *,
+        prefix: str,
+        allowed_extensions: set[str],
+        label: str,
+    ) -> None:
+        # The key must point inside the curated catalog (and carry no traversal), so a
+        # client can never coerce the worker into reading an arbitrary object.
+        if not key.startswith(prefix) or ".." in key:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid source {label} selection.",
+            )
+        if PurePosixPath(key).suffix.lower() not in allowed_extensions:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported source {label} type.",
+            )
+        if await self.storage.head(key) is None:
+            raise AppException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Selected source {label} was not found.",
+            )
+
     @staticmethod
     def _ensure_owned(video: Video | None, user: User) -> Video:
         # 404 (not 403) so we never reveal that another user's video id exists.

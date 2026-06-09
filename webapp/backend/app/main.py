@@ -12,6 +12,7 @@ from app.db.session import AsyncSessionLocal, engine
 from app import models as _models  # noqa: F401
 from app.processing.pipeline import AnonymizationPipeline
 from app.processing.processor import LocalVideoProcessor
+from app.services.source_asset_service import SourceAssetService
 from app.services.video_service import VideoService
 from app.storage.base import StorageError
 from app.storage.r2 import R2Storage
@@ -40,6 +41,10 @@ async def lifespan(app: FastAPI):
     )
     app.state.video_service = VideoService(storage=storage, processor=processor)
 
+    # Curated face/voice catalogs share the one storage client; the service is
+    # stateless beyond a short-lived listing cache, so it is built here once.
+    app.state.source_asset_service = SourceAssetService(storage=storage)
+
     # Live camera (real-time): share the pipeline and bound concurrent inferences so
     # a burst of viewers cannot starve the event loop or the offline edit worker.
     app.state.live_pipeline = pipeline
@@ -49,6 +54,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         app.state.video_service = None
+        app.state.source_asset_service = None
         app.state.live_pipeline = None
         app.state.live_limiter = None
 

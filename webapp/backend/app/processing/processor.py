@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
@@ -73,16 +74,39 @@ class LocalVideoProcessor(VideoProcessor):
 
             try:
                 with TemporaryDirectory(prefix="anonymize_") as workdir:
-                    source_path = Path(workdir) / f"source{source_suffix}"
-                    output_path = Path(workdir) / f"{edit.id}.mp4"
+                    work = Path(workdir)
+                    source_path = work / f"source{source_suffix}"
+                    output_path = work / f"{edit.id}.mp4"
 
                     await self._storage.download_to_path(source_key, str(source_path))
+
+                    # Fetch the selected source face / voice next to the video. Only
+                    # for the method that consumes each; a missing key means "use the
+                    # engine's bundled default identity".
+                    swap_source_path = await self._fetch_optional_asset(
+                        params.get("swap_source_key")
+                        if params.get("visual_method") == "swap"
+                        else None,
+                        work / "swap_source",
+                    )
+                    voice_reference_path = await self._fetch_optional_asset(
+                        params.get("voice_reference_key")
+                        if params.get("anonymize_voice")
+                        and params.get("voice_method") == "convert"
+                        else None,
+                        work / "voice_reference",
+                    )
+
                     # CPU-bound work off the event loop.
                     await anyio.to_thread.run_sync(
-                        self._pipeline.process_file,
-                        str(source_path),
-                        str(output_path),
-                        params,
+                        partial(
+                            self._pipeline.process_file,
+                            str(source_path),
+                            str(output_path),
+                            params,
+                            swap_source_path=swap_source_path,
+                            voice_reference_path=voice_reference_path,
+                        )
                     )
                     with output_path.open("rb") as output_file:
                         await self._storage.upload_fileobj(
@@ -98,6 +122,16 @@ class LocalVideoProcessor(VideoProcessor):
                 await VideoEditRepository.mark_failed(
                     db, edit, error_message=str(exc)[:1000]
                 )
+
+    async def _fetch_optional_asset(
+        self, key: str | None, dest_stem: Path
+    ) -> str | None:
+        """Download ``key`` to ``dest_stem`` (+ the key's extension); ``None`` if unset."""
+        if not key:
+            return None
+        dest = dest_stem.with_suffix(Path(key).suffix)
+        await self._storage.download_to_path(key, str(dest))
+        return str(dest)
 
     @staticmethod
     def _output_key(video_id: int, edit_id: int) -> str:

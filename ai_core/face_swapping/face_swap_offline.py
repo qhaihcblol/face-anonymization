@@ -73,10 +73,13 @@ class OfflineFaceSwapStabilizer:
         max_gap: int = 8,
         sg_window: int = 9,
         sg_polyorder: int = 2,
+        source_blob: np.ndarray | None = None,
     ) -> None:
         self.detector = detector
         self.swapper = swapper
         self.aligner = swapper.target_aligner
+        # Identity pasted onto every face for this run (None = swapper's default).
+        self.source_blob = source_blob
         # With zero-phase landmark smoothing the crops are already steady, so the
         # crop/mask EMA defaults to off (it would only reintroduce motion blur).
         self.output_smooth = float(np.clip(output_smooth, 0.0, 1.0))
@@ -245,7 +248,9 @@ class OfflineFaceSwapStabilizer:
                 ),
             )
             aligned = self.aligner.align_detection(detection)
-            swapped_crop, mask = self.swapper.swap_aligned(frame_rgb, aligned)
+            swapped_crop, mask = self.swapper.swap_aligned(
+                frame_rgb, aligned, self.source_blob
+            )
 
             prev = self._render_state.get(entry.track_id)
             if prev is not None:
