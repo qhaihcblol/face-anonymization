@@ -30,6 +30,7 @@ import { Label } from '@/components/ui/label'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -202,6 +203,9 @@ export function SourceFacePicker({
               {zoom?.name}
               <GenderChip gender={zoom?.gender ?? null} />
             </DialogTitle>
+            <DialogDescription>
+              Preview this source face, then use it as the swap identity.
+            </DialogDescription>
           </DialogHeader>
           <div className="overflow-hidden rounded-lg border border-cyan-300/25 bg-slate-950">
             {zoom ? (
