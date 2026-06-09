@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   AlertCircle,
@@ -33,6 +33,14 @@ import {
 } from '@/lib/videos/format'
 import type { VideoEditPublic, VideoPublic } from '@/lib/videos/types'
 
+/** How often to re-poll an expanded card while a run is still in progress. */
+const POLL_INTERVAL_MS = 2500
+
+/** True while a run hasn't reached a terminal state, so its status can still change. */
+function isInProgress(edit: VideoEditPublic): boolean {
+  return edit.status === 'pending' || edit.status === 'processing'
+}
+
 /** A compact icon + text fact in the source video's metadata row. */
 function MetaChip({ icon: Icon, children }: { icon: LucideIcon; children: string }) {
   return (
@@ -59,8 +67,11 @@ export function HistoryVideoCard({
   const [edits, setEdits] = useState<VideoEditPublic[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Guards against overlapping polls if a refresh outlives the poll interval.
+  const refreshingRef = useRef(false)
 
-  const loadEdits = async () => {
+  // Initial (visible) load: shows the skeleton and surfaces errors.
+  const loadEdits = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -74,7 +85,23 @@ export function HistoryVideoCard({
     } finally {
       setLoading(false)
     }
-  }
+  }, [video.id])
+
+  // Background refresh used by polling: silent, and a transient failure must not
+  // wipe the list or flash an error — we just retry on the next tick.
+  const refreshEdits = useCallback(async () => {
+    if (refreshingRef.current) {
+      return
+    }
+    refreshingRef.current = true
+    try {
+      setEdits(await listEdits(video.id))
+    } catch {
+      /* keep the current list; the next poll will try again */
+    } finally {
+      refreshingRef.current = false
+    }
+  }, [video.id])
 
   const toggle = () => {
     const next = !expanded
@@ -83,6 +110,17 @@ export function HistoryVideoCard({
       void loadEdits()
     }
   }
+
+  // Smart polling: only while the card is open and at least one run is unsettled.
+  // Re-running on `edits` change re-evaluates that condition, so polling stops by
+  // itself once everything is completed/failed (and on collapse/unmount).
+  useEffect(() => {
+    if (!expanded || !edits?.some(isInProgress)) {
+      return
+    }
+    const timer = setInterval(() => void refreshEdits(), POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [expanded, edits, refreshEdits])
 
   const resolution = formatResolution(video.width, video.height)
 
