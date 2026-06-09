@@ -185,120 +185,63 @@ pnpm dev
 
 ## 5. Deploy production
 
-Topology khuyến nghị — tách 3 phần, mỗi phần ở đúng chỗ mạnh của nó:
+Topology: **Frontend → Vercel**, **Backend → GPU box (vast.ai)**, **DB → Postgres managed
+(Neon/Supabase)**, **File → Cloudflare R2**. Browser gọi backend qua proxy server‑side của
+Vercel; upload (PUT) & playback (GET) đi thẳng browser ↔ R2; live camera đi thẳng `wss` tới backend.
 
 ```
- Browser ──HTTPS──> Frontend (Vercel)
-   │                    │  proxy server-side (BACKEND_API_BASE_URL)
-   │                    ▼
-   │             Backend (GPU box: vast.ai / VPS) ──> PostgreSQL (Neon/Supabase, managed)
-   │                    ▲                          └─> Cloudflare R2 (S3 API)
-   ├── upload (PUT) & playback (GET) đi THẲNG ─────> Cloudflare R2
-   └── live camera (WSS) đi thẳng ─────────────────> Backend
+ Browser ──HTTPS──> Frontend (Vercel) ──proxy──> Backend (vast.ai) ──> Postgres + R2
+   └── upload/playback & live camera (wss) ─────> R2 / Backend (đi thẳng)
 ```
 
-- **Frontend → Vercel** (serverless + CDN). Mọi call tới backend đi qua proxy server‑side.
-- **Backend → GPU box** (vast.ai / VPS có GPU): process chạy lâu dài, giữ model ONNX
-  trong VRAM, mở WebSocket → **không** deploy lên Vercel/serverless được.
-- **DB (PostgreSQL managed) + file (R2)** đều nằm ngoài GPU box → đổi/mất instance
-  không mất dữ liệu.
-- **Upload đi thẳng browser → R2** (presigned PUT) → video lớn không qua backend.
-
-> Ràng buộc bắt buộc:
-> - Backend phải có **HTTPS** (frontend là https → live camera dùng `wss://`; `http`
->   thường bị chặn mixed‑content).
-> - Chạy backend **1 process** (`--workers 1`): mỗi process nạp một bộ ONNX riêng vào
->   VRAM, và worker xử lý nền + state live là per‑process.
+> 2 ràng buộc: backend phải có **HTTPS** (live camera dùng `wss`); chạy **1 process**
+> (`--workers 1`) — mỗi process nạp riêng ONNX vào VRAM và giữ state live per‑process.
 
 ### 5.1. Backend lên vast.ai
 
-**1) Tạo instance:** GPU NVIDIA ≥ 16GB VRAM (vd RTX 4090), disk ≥ 30GB, image có CUDA 12
-+ cuDNN (vd `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` hoặc image PyTorch). Không
-cần mở port inbound nếu dùng Cloudflare Tunnel (tunnel xuyên NAT).
+1. **Tạo instance** GPU NVIDIA ≥ 16GB VRAM, disk ≥ 30GB, image CUDA 12 + cuDNN. Không cần
+   mở port inbound (Cloudflare Tunnel xuyên NAT). **SSH vào** bằng lệnh vast.ai cấp.
+2. **Clone + cài đặt + tải model** — chạy đúng **mục 2 → 3** ở trên (clone repo, tạo conda
+   env, `pip install -r requirements.txt`, `download_onnx_files.py`, tạo `webapp/backend/.env`).
+   Bỏ qua mục 4 (đó là chạy dev). Ở `.env`: trỏ `DATABASE_URL` tới Postgres managed, điền
+   đủ `R2_*`; `CORS_ORIGINS` không cần (call đi qua proxy).
+3. **Chạy backend** (tmux để sống qua SSH):
+   ```bash
+   tmux new -s backend
+   cd webapp/backend
+   uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1   # Ctrl+B D để detach
+   ```
+   Kiểm tra: `curl http://localhost:8000/health` → `{"status":"ok"}`.
+4. **Cloudflare Tunnel** (TLS + WebSocket, không cần mở port):
+   ```bash
+   curl -sL -o /usr/local/bin/cloudflared \
+     https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+   chmod +x /usr/local/bin/cloudflared
 
-**2) SSH vào** (vast.ai cấp sẵn lệnh): `ssh -p <PORT> root@<HOST>`
+   tmux new -s tunnel
+   cloudflared tunnel --url http://localhost:8000   # copy URL https://<...>.trycloudflare.com
+   ```
+   > Quick tunnel đổi URL mỗi lần restart → sửa lại env Vercel + redeploy. Muốn cố định:
+   > dùng **named tunnel + domain riêng**.
 
-**3) Lấy code + cài môi trường + model:**
-```bash
-apt-get update && apt-get install -y git ffmpeg curl
-git clone https://github.com/qhaihcblol/face-anonymization.git
-cd face-anonymization
+### 5.2. Frontend lên Vercel
 
-# conda (nếu image chưa có Python phù hợp)
-curl -sL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o /tmp/mc.sh
-bash /tmp/mc.sh -b -p ./.conda
-./.conda/bin/conda install -p ./.conda python=3.12 -y
-
-./.conda/bin/pip install -r requirements.txt   # onnxruntime-gpu[cuda,cudnn] + kagglehub
-
-# model ONNX (xem mục 2.2):
-mkdir -p ai_core/face_detection/onnx ai_core/face_parsing/onnx \
-         ai_core/face_swapping/onnx ai_core/face_restoration/onnx \
-         ai_core/voice_anonymization/onnx
-./.conda/bin/python scripts/download_onnx_files.py
-```
-
-**4) Tạo `webapp/backend/.env`** (xem mục 3.1): `SECRET_KEY`, `DATABASE_URL` trỏ Postgres
-managed, `R2_*` đầy đủ. `CORS_ORIGINS` không bắt buộc (call đi qua proxy server‑side).
-
-**5) Chạy backend (tmux để sống qua SSH):**
-```bash
-tmux new -s backend
-cd webapp/backend
-../../.conda/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
-# Ctrl+B rồi D để detach;  tmux attach -t backend để quay lại
-```
-Kiểm tra: `curl http://localhost:8000/health` → `{"status":"ok"}`.
-
-### 5.2. Expose backend ra internet (Cloudflare Tunnel)
-
-```bash
-curl -sL -o ./.conda/bin/cloudflared \
-  https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-chmod +x ./.conda/bin/cloudflared
-
-tmux new -s tunnel
-cloudflared tunnel --url http://localhost:8000     # → copy URL https://<...>.trycloudflare.com
-# Ctrl+B rồi D
-```
-- Tunnel tự lo **TLS + WebSocket** (live camera chạy được qua `wss`), không cần mở port.
-- **URL cố định?** Quick tunnel đổi URL mỗi lần restart. Muốn cố định → **named tunnel +
-  domain riêng**: add domain vào Cloudflare, `cloudflared tunnel create`, route DNS
-  `api.tenban.com` → tunnel (theo docs Cloudflare Tunnel).
-
-### 5.3. Frontend lên Vercel
-
-- Import repo, đặt **Root Directory = `webapp/frontend`** (Next.js tự nhận diện).
-- **Settings → Environment Variables** (Production + Preview), thêm:
+- Import repo, **Root Directory = `webapp/frontend`**.
+- **Settings → Environment Variables**, thêm (server‑side, **không** `NEXT_PUBLIC_`):
   ```
-  BACKEND_API_BASE_URL = https://<tunnel-url>/api
+  BACKEND_API_BASE_URL = https://<tunnel-url>/api      # nhớ đuôi /api
   ```
-  Nhớ đuôi `/api`. Đây là biến **server‑side** — **không** thêm tiền tố `NEXT_PUBLIC_`.
-- **Redeploy** để env có hiệu lực (Vercel không tự áp env mới vào bản deploy cũ).
+- **Redeploy** để env có hiệu lực.
 
-### 5.4. CORS cho R2 (bắt buộc — nếu thiếu, upload sẽ lỗi mạng)
+### 5.3. CORS cho R2
 
-Upload đi thẳng browser → R2 nên bucket phải cho phép PUT từ domain frontend.
-**Cloudflare → R2 → bucket → Settings → CORS Policy:**
-```json
-[
-  {
-    "AllowedOrigins": ["https://your-app.vercel.app"],
-    "AllowedMethods": ["PUT", "GET"],
-    "AllowedHeaders": ["content-type"],
-    "MaxAgeSeconds": 3600
-  }
-]
-```
+Bucket R2 phải cho phép `PUT`/`GET` từ domain Vercel (upload đi thẳng browser → R2).
+Set trong **Cloudflare → R2 → bucket → Settings → CORS Policy**.
 
-### 5.5. Lưu ý vận hành
+### 5.4. Lưu ý vận hành
 
-- **Instance vast.ai có thể bị thu hồi** → không để dữ liệu trên đó (DB ở Neon, file ở
-  R2 — đã đúng). Mất instance thì dựng lại theo các bước trên.
-- **Quick tunnel đổi URL** mỗi lần restart → phải sửa lại env Vercel + redeploy. Giữ
-  tiến trình `cloudflared` chạy liên tục (tmux), hoặc dùng named tunnel cho URL cố định.
-- **Object mồ côi trên R2** (xin URL nhưng không upload xong): đặt **lifecycle rule** xóa
-  object cũ dưới prefix `uploads/` sau N ngày.
+- Instance vast.ai có thể bị thu hồi → dữ liệu đã nằm ngoài (Neon + R2), dựng lại theo các bước trên.
+- Giữ `cloudflared` chạy liên tục; quick tunnel đổi URL thì phải cập nhật env Vercel.
 - **Cold start**: model nạp lần đầu khi có request/live đầu tiên (vài chục giây).
 
 ---
