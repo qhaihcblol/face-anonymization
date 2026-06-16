@@ -10,6 +10,8 @@ __pycache__/
 test_videos/*
 !test_videos/.gitkeep
 
+test_voices/*
+!test_voices/.gitkeep
 outputs/*
 !outputs/.gitkeep
 
