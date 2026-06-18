@@ -156,6 +156,8 @@ class AnonymizationPipeline:
                 blur_strength=int(payload.get("blur_strength", 31)),
                 pixelation_level=int(payload.get("pixelation_level", 16)),
                 mask_color=_hex_to_bgr(payload.get("mask_color", "#A0A0A0")),
+                # ObfuscationParams coerces the raw string ("parser"/"ellipse").
+                mask_shape=str(payload.get("mask_shape", "parser")).strip().lower(),
             ),
         )
 

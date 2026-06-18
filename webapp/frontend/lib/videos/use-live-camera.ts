@@ -13,8 +13,6 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react'
 
-export type ResolutionPreset = '480p' | '720p' | '1080p'
-
 export type CameraDevice = {
   id: string
   label: string
@@ -28,20 +26,11 @@ export type RecordedClip = {
   durationSec: string
 }
 
-export type ActiveStreamProfile = {
-  width?: number
-  height?: number
-  frameRate?: number
-}
-
-export const resolutionConfig: Record<
-  ResolutionPreset,
-  { width: number; height: number; label: string }
-> = {
-  '480p': { width: 854, height: 480, label: '480p (16:9)' },
-  '720p': { width: 1280, height: 720, label: '720p (HD, 16:9)' },
-  '1080p': { width: 1920, height: 1080, label: '1080p (Full HD, 16:9)' },
-}
+// Capture size requested from the camera (the device is free to pick another). Fixed
+// because it is not a user-facing knob: real-time throughput is governed by the
+// send-side downscale in useLiveProcessing and the mask shape, not the raw capture
+// size, so exposing this only added a confusing control with little effect on FPS.
+const PREFERRED_CAPTURE = { width: 1280, height: 720 } as const
 
 /**
  * Wires the camera hook to the anonymized output so recordings capture the
@@ -67,13 +56,10 @@ export type LiveCameraController = {
   cameraDevices: CameraDevice[]
   selectedCamera: string
   setSelectedCamera: (id: string) => void
-  resolution: ResolutionPreset
-  setResolution: (resolution: ResolutionPreset) => void
   isStreaming: boolean
   isRecording: boolean
   fps: number
   latencyMs: number | null
-  activeProfile: ActiveStreamProfile | null
   statusMessage: string
   errorMessage: string | null
   recordedClips: RecordedClip[]
@@ -137,12 +123,10 @@ export function useLiveCamera(
 
   const [cameraDevices, setCameraDevices] = useState<CameraDevice[]>([])
   const [selectedCamera, setSelectedCamera] = useState('default')
-  const [resolution, setResolution] = useState<ResolutionPreset>('720p')
   const [isStreaming, setIsStreaming] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [fps, setFps] = useState(0)
   const [latencyMs, setLatencyMs] = useState<number | null>(null)
-  const [activeProfile, setActiveProfile] = useState<ActiveStreamProfile | null>(null)
   const [statusMessage, setStatusMessage] = useState('Idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [recordedClips, setRecordedClips] = useState<RecordedClip[]>([])
@@ -286,7 +270,6 @@ export function useLiveCamera(
 
     if (isMountedRef.current) {
       setIsStreaming(false)
-      setActiveProfile(null)
     }
 
     if (updateStatus && isMountedRef.current) {
@@ -305,10 +288,9 @@ export function useLiveCamera(
     try {
       stopStream(false)
 
-      const { width, height, label } = resolutionConfig[resolution]
       const preferredVideoConstraints: MediaTrackConstraints = {
-        width: { ideal: width },
-        height: { ideal: height },
+        width: { ideal: PREFERRED_CAPTURE.width },
+        height: { ideal: PREFERRED_CAPTURE.height },
         aspectRatio: { ideal: 16 / 9 },
         ...(selectedCamera !== 'default'
           ? { deviceId: { exact: selectedCamera } }
@@ -335,14 +317,6 @@ export function useLiveCamera(
 
       streamRef.current = stream
 
-      const [videoTrack] = stream.getVideoTracks()
-      const trackSettings = videoTrack?.getSettings()
-      setActiveProfile({
-        width: trackSettings?.width,
-        height: trackSettings?.height,
-        frameRate: trackSettings?.frameRate,
-      })
-
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         await videoRef.current.play()
@@ -352,13 +326,11 @@ export function useLiveCamera(
       startFpsMonitor()
       if (isMountedRef.current) {
         setIsStreaming(true)
-        const resolvedWidth = trackSettings?.width
-        const resolvedHeight = trackSettings?.height
-        if (resolvedWidth && resolvedHeight) {
-          setStatusMessage(`Streaming at ${label}`)
-        } else {
-          setStatusMessage(`Streaming with ${label} preference`)
-        }
+        const [videoTrack] = stream.getVideoTracks()
+        const { width, height } = videoTrack?.getSettings() ?? {}
+        setStatusMessage(
+          width && height ? `Streaming at ${width}×${height}` : 'Streaming',
+        )
       }
     } catch {
       if (isMountedRef.current) {
@@ -540,13 +512,10 @@ export function useLiveCamera(
     cameraDevices,
     selectedCamera,
     setSelectedCamera,
-    resolution,
-    setResolution,
     isStreaming,
     isRecording,
     fps,
     latencyMs,
-    activeProfile,
     statusMessage,
     errorMessage,
     recordedClips,

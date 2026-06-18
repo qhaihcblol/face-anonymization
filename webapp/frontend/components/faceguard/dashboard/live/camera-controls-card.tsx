@@ -25,12 +25,14 @@ import {
   OptionSelect,
   SettingsSection,
 } from '@/components/faceguard/dashboard/upload/settings-section'
-import { liveFilterOptions, type LiveFilterForm } from '@/lib/videos/options'
 import {
-  resolutionConfig,
+  liveFilterOptions,
+  liveMaskShapeOptions,
+  type LiveFilterForm,
+} from '@/lib/videos/options'
+import {
   type CameraDevice,
   type RecordedClip,
-  type ResolutionPreset,
 } from '@/lib/videos/use-live-camera'
 
 type FilterPatch = Partial<LiveFilterForm>
@@ -44,8 +46,6 @@ export function CameraControlsCard({
   cameraDevices,
   selectedCamera,
   onSelectCamera,
-  resolution,
-  onSelectResolution,
   onApplySettings,
   filter,
   onFilterChange,
@@ -59,8 +59,6 @@ export function CameraControlsCard({
   cameraDevices: CameraDevice[]
   selectedCamera: string
   onSelectCamera: (id: string) => void
-  resolution: ResolutionPreset
-  onSelectResolution: (resolution: ResolutionPreset) => void
   onApplySettings: () => void
   filter: LiveFilterForm
   onFilterChange: (patch: FilterPatch) => void
@@ -100,25 +98,6 @@ export function CameraControlsCard({
             </Select>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="resolution-select">Capture Resolution</Label>
-            <Select
-              value={resolution}
-              onValueChange={(value) => onSelectResolution(value as ResolutionPreset)}
-            >
-              <SelectTrigger id="resolution-select" className="w-full border-cyan-300/35">
-                <SelectValue placeholder="Select resolution" />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.entries(resolutionConfig).map(([value, config]) => (
-                  <SelectItem key={value} value={value}>
-                    {config.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
           <Button
             onClick={onApplySettings}
             variant="outline"
@@ -141,6 +120,16 @@ export function CameraControlsCard({
             options={liveFilterOptions}
             onValueChange={(method) => onFilterChange({ method })}
           />
+
+          {filter.method !== 'none' && (
+            <OptionSelect
+              id="live-mask-shape"
+              label="Mask quality"
+              value={filter.maskShape}
+              options={liveMaskShapeOptions}
+              onValueChange={(maskShape) => onFilterChange({ maskShape })}
+            />
+          )}
 
           {filter.method === 'blur' && (
             <NumberField

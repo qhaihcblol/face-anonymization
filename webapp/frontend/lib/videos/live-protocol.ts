@@ -52,6 +52,7 @@ export function buildLiveConfigMessage(filter: LiveFilterForm) {
     blur_strength: Number(filter.blurStrength) || 31,
     pixelation_level: Number(filter.pixelationLevel) || 16,
     mask_color: filter.maskColor,
+    mask_shape: filter.maskShape,
     draw_boxes: false,
   }
 }

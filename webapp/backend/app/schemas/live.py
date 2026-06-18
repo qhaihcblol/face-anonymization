@@ -19,6 +19,18 @@ class LiveVisualMethod(str, Enum):
     BLACKOUT = "blackout"
 
 
+class MaskShape(str, Enum):
+    """How the face region is masked on the live path (mirrors ai_core's ``MaskShape``).
+
+    ``parser`` runs a precise BiSeNet segmentation that hugs the face (lower FPS);
+    ``ellipse`` uses a coarse, model-free ellipse (much higher FPS). It is the single
+    biggest real-time lever, so it is exposed to the user.
+    """
+
+    PARSER = "parser"
+    ELLIPSE = "ellipse"
+
+
 class LiveConfigMessage(BaseModel):
     """One real-time filter-config message sent by the browser over the live socket.
 
@@ -34,6 +46,9 @@ class LiveConfigMessage(BaseModel):
     pixelation_level: int = Field(default=16, ge=4, le=256)
     # Solid fill for MASK, as a ``#RRGGBB`` hex colour.
     mask_color: str = Field(default="#A0A0A0", pattern=r"^#?[0-9a-fA-F]{6}$")
+    # How the face region is masked: precise BiSeNet parse vs cheap ellipse. The
+    # ellipse skips a per-face model inference, so it is the main real-time FPS lever.
+    mask_shape: MaskShape = MaskShape.PARSER
     # Overlay tracker boxes on the streamed-back frame.
     draw_boxes: bool = False
     # Detector cadence: run it every N frames (higher = lower latency).

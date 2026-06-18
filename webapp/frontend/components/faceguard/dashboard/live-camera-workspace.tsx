@@ -99,8 +99,6 @@ export function LiveCameraWorkspace() {
         cameraDevices={camera.cameraDevices}
         selectedCamera={camera.selectedCamera}
         onSelectCamera={camera.setSelectedCamera}
-        resolution={camera.resolution}
-        onSelectResolution={camera.setResolution}
         onApplySettings={() => void camera.startStream()}
         filter={filter}
         onFilterChange={updateFilter}

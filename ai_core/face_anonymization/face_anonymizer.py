@@ -26,6 +26,20 @@ class AnonymizationMethod(Enum):
     SWAP = "swap"
 
 
+class MaskShape(Enum):
+    """How the obfuscation region for one face is computed.
+
+    * ``PARSER`` — a BiSeNet semantic-segmentation mask on an aligned crop: it hugs
+      the real face (best quality), but runs a model inference *per face, per frame*.
+    * ``ELLIPSE`` — a soft elliptical region derived from the bounding box: coarse,
+      but model-free and dramatically cheaper. This is the main real-time FPS lever
+      on the live path (it skips the per-face parser entirely).
+    """
+
+    PARSER = "parser"
+    ELLIPSE = "ellipse"
+
+
 @dataclass(slots=True)
 class ObfuscationParams:
     """Tunable knobs for the no-model obfuscation methods (blur / pixelate / mask).
@@ -46,6 +60,10 @@ class ObfuscationParams:
     quantization_levels: int = 8
     # Soft-edge width (px std-dev) for the ellipse fallback mask.
     mask_feather: float = 4.0
+    # How the face region is masked: precise BiSeNet parse (PARSER) vs cheap ellipse
+    # (ELLIPSE). The parser hugs the real face but runs a model per face per frame;
+    # the ellipse is model-free and far faster — the main real-time lever for live.
+    mask_shape: MaskShape | str = MaskShape.PARSER
 
     def __post_init__(self) -> None:
         blur = max(int(self.blur_strength), 3)
@@ -58,6 +76,12 @@ class ObfuscationParams:
         self.noise_strength = max(float(self.noise_strength), 0.0)
         self.quantization_levels = max(int(self.quantization_levels), 0)
         self.mask_feather = max(float(self.mask_feather), 0.0)
+        # Accept raw UI input (e.g. "ellipse") and coerce to the enum.
+        self.mask_shape = (
+            self.mask_shape
+            if isinstance(self.mask_shape, MaskShape)
+            else MaskShape(str(self.mask_shape).strip().lower())
+        )
 
 
 class FaceAnonymizer:
@@ -218,9 +242,14 @@ class FaceAnonymizer:
     ) -> np.ndarray:
         """Combined soft face mask (float32 [0, 1]) over all detections.
 
-        Each face uses the BiSeNet parser when landmarks and a parser are available
-        (precise, hugs the real face), otherwise an elliptical bound. The parser mask
-        also falls back to the ellipse on failure, so the face is never under-covered.
+        ``params.mask_shape`` selects the strategy per face:
+
+        * ``PARSER`` (default): a BiSeNet mask that hugs the real face when landmarks
+          and a parser are available, falling back to the ellipse on failure so the
+          face is never under-covered. Precise, but a model inference per face.
+        * ``ELLIPSE``: the coarse elliptical bound only — no parser, no model call.
+          Far cheaper, which is what makes it the live-path FPS lever.
+
         Faces are unioned (per-pixel max).
         """
         shape = image.shape[:2]
@@ -231,9 +260,10 @@ class FaceAnonymizer:
                 continue
 
             face_mask: np.ndarray | None = None
-            landmarks = self._landmarks_from(det)
-            if landmarks is not None:
-                face_mask = self._parser_face_mask(image, landmarks, bbox, shape)
+            if params.mask_shape is MaskShape.PARSER:
+                landmarks = self._landmarks_from(det)
+                if landmarks is not None:
+                    face_mask = self._parser_face_mask(image, landmarks, bbox, shape)
             if face_mask is None:
                 face_mask = self._ellipse_face_mask(bbox, shape, params)
             mask = np.maximum(mask, face_mask)

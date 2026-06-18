@@ -46,6 +46,27 @@ export const liveFilterOptions: SelectOption<LiveFilterMethod>[] = [
 ]
 
 /**
+ * How the obfuscated region is shaped. The precise BiSeNet parser runs a model per
+ * face per frame (the dominant cost on the live path), so swapping to the model-free
+ * ellipse is the single biggest real-time frame-rate lever. Mirrors the backend
+ * `MaskShape`.
+ */
+export type LiveMaskShape = 'parser' | 'ellipse'
+
+export const liveMaskShapeOptions: SelectOption<LiveMaskShape>[] = [
+  {
+    value: 'parser',
+    label: 'Precise (BiSeNet)',
+    description: 'Mask hugs the real face — best quality, but lower frame rate.',
+  },
+  {
+    value: 'ellipse',
+    label: 'Fast (ellipse)',
+    description: 'Coarse elliptical region — skips the per-face model for a much higher frame rate.',
+  },
+]
+
+/**
  * Controlled state for the live-camera privacy filter. Mirrors the visual half of
  * {@link ProtectionForm}: numeric knobs stay as input strings so the fields can be
  * cleared while typing, and are parsed only when used.
@@ -55,6 +76,8 @@ export type LiveFilterForm = {
   blurStrength: string
   pixelationLevel: string
   maskColor: string
+  /** Mask precision vs speed; see {@link LiveMaskShape}. */
+  maskShape: LiveMaskShape
 }
 
 export const defaultLiveFilterForm: LiveFilterForm = {
@@ -62,6 +85,7 @@ export const defaultLiveFilterForm: LiveFilterForm = {
   blurStrength: '31',
   pixelationLevel: '16',
   maskColor: '#A0A0A0',
+  maskShape: 'parser',
 }
 
 /**
