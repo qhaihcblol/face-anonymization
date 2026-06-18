@@ -9,7 +9,7 @@ import {
   summarizeLiveFilter,
   type LiveFilterForm,
 } from '@/lib/videos/options'
-import { useLiveCamera } from '@/lib/videos/use-live-camera'
+import { resolutionConfig, useLiveCamera } from '@/lib/videos/use-live-camera'
 import { useLiveProcessing } from '@/lib/videos/use-live-processing'
 
 /**
@@ -47,6 +47,9 @@ export function LiveCameraWorkspace() {
     filter,
     showBoundingBox,
     showConfidence,
+    // Honor the user's "Capture Resolution" choice: cap the sent frame at the
+    // selected preset's width instead of the hard-coded 640px default.
+    sendMaxWidth: resolutionConfig[camera.resolution].width,
   })
 
   // Protection is on AND at least one anonymized frame has painted — i.e. the
