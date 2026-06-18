@@ -111,7 +111,7 @@ export function CameraPreviewCard({
           <canvas
             ref={outputCanvasRef}
             className={cn(
-              'pointer-events-none absolute inset-0 h-full w-full -scale-x-100 object-contain transition-opacity duration-200',
+              'pointer-events-none absolute inset-0 h-full w-full object-contain transition-opacity duration-200',
               showProcessed ? 'opacity-100' : 'opacity-0',
             )}
           />

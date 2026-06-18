@@ -73,10 +73,14 @@ export type LiveProcessing = {
   stats: LiveProcessingStats
 }
 
+// The processed frame is painted mirrored (selfie view), so face geometry is
+// mirrored to stay aligned — but the labels are drawn upright/left-to-right so the
+// confidence text reads normally. `canvasWidth` is the mirror axis (x -> w - x).
 function drawFaceBoxes(
   ctx: CanvasRenderingContext2D,
   faces: LiveFaceBox[],
   showConfidence: boolean,
+  canvasWidth: number,
 ): void {
   ctx.lineWidth = 2
   ctx.strokeStyle = 'rgba(34, 211, 238, 0.95)' // cyan-400
@@ -85,15 +89,17 @@ function drawFaceBoxes(
 
   for (const face of faces) {
     const [x1, y1, x2, y2] = face.bbox
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+    // After the horizontal flip the left edge of the box sits at `w - x2`.
+    const left = canvasWidth - x2
+    ctx.strokeRect(left, y1, x2 - x1, y2 - y1)
 
     if (showConfidence) {
       const label = `#${face.id}  ${(face.score * 100).toFixed(0)}%`
       const width = ctx.measureText(label).width
       ctx.fillStyle = 'rgba(2, 6, 23, 0.7)' // slate-950/70
-      ctx.fillRect(x1, Math.max(y1 - 18, 0), width + 8, 18)
+      ctx.fillRect(left, Math.max(y1 - 18, 0), width + 8, 18)
       ctx.fillStyle = 'rgba(207, 250, 254, 1)' // cyan-100
-      ctx.fillText(label, x1 + 4, Math.max(y1 - 4, 14))
+      ctx.fillText(label, left + 4, Math.max(y1 - 4, 14))
     }
   }
 }
@@ -124,11 +130,17 @@ async function paintFrame(
     canvas.height = meta.height
   }
 
+  // Mirror the frame horizontally so the preview behaves like a mirror (and the
+  // canvas-captured recording is mirrored to match). The transform is scoped so the
+  // overlay below draws in normal, unmirrored coordinates.
+  ctx.save()
+  ctx.setTransform(-1, 0, 0, 1, meta.width, 0)
   ctx.drawImage(bitmap, 0, 0, meta.width, meta.height)
+  ctx.restore()
   bitmap.close()
 
   if (showBoundingBox && meta.faces.length > 0) {
-    drawFaceBoxes(ctx, meta.faces, showConfidence)
+    drawFaceBoxes(ctx, meta.faces, showConfidence, meta.width)
   }
 }
 

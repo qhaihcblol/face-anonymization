@@ -122,6 +122,11 @@ export function useLiveCamera(
   // so we only tear down a canvas capture, never the live camera.
   const recordStreamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
+  // Offscreen canvas (+ its rAF) used to mirror the raw feed into the recording so
+  // the saved clip matches the mirrored on-screen preview. Only used when recording
+  // the unprocessed stream; the processed path already records the mirrored canvas.
+  const mirrorCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const mirrorRafRef = useRef<number | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const startedAtRef = useRef<number>(0)
   const fpsIntervalRef = useRef<number | null>(null)
@@ -212,9 +217,53 @@ export function useLiveCamera(
     recorder.stop()
   }
 
+  const stopMirrorCapture = () => {
+    if (mirrorRafRef.current !== null) {
+      window.cancelAnimationFrame(mirrorRafRef.current)
+      mirrorRafRef.current = null
+    }
+  }
+
+  // Continuously paint the raw <video> horizontally flipped onto an offscreen
+  // canvas and capture it, so a raw (no-filter) recording is mirrored like the
+  // preview. Returns null if capture isn't possible; the caller falls back to the
+  // raw stream.
+  const startMirrorCapture = (): MediaStream | null => {
+    const video = videoRef.current
+    const canvas =
+      mirrorCanvasRef.current ??
+      (mirrorCanvasRef.current = document.createElement('canvas'))
+    const ctx = canvas.getContext('2d')
+    if (!video || !ctx || typeof canvas.captureStream !== 'function') {
+      return null
+    }
+
+    const draw = () => {
+      const width = video.videoWidth
+      const height = video.videoHeight
+      if (width > 0 && height > 0) {
+        if (canvas.width !== width) {
+          canvas.width = width
+        }
+        if (canvas.height !== height) {
+          canvas.height = height
+        }
+        ctx.save()
+        ctx.setTransform(-1, 0, 0, 1, canvas.width, 0)
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        ctx.restore()
+      }
+      mirrorRafRef.current = window.requestAnimationFrame(draw)
+    }
+
+    draw()
+    return canvas.captureStream()
+  }
+
   // Stop the recorder's source only when it's a canvas capture we created — the
   // raw camera stream is owned by streamRef and torn down by stopStream.
   const releaseRecordingStream = () => {
+    stopMirrorCapture()
     const recordingStream = recordStreamRef.current
     recordStreamRef.current = null
     if (recordingStream && recordingStream !== streamRef.current) {
@@ -333,15 +382,17 @@ export function useLiveCamera(
     }
 
     // Record the anonymized canvas while protection is live so saved clips never
-    // contain the original face; fall back to the raw feed only for the no-filter
-    // local preview — which is exactly what's shown on screen.
+    // contain the original face — it's already mirrored to match the preview. For
+    // the no-filter local preview, mirror the raw feed through an offscreen canvas
+    // so the saved clip matches the mirrored on-screen view; fall back to the raw
+    // stream if canvas capture isn't available.
     const processedCanvas = recordProcessedRef?.current
       ? processedCanvasRef?.current ?? null
       : null
     const recordingStream =
       processedCanvas && typeof processedCanvas.captureStream === 'function'
         ? processedCanvas.captureStream()
-        : streamRef.current
+        : startMirrorCapture() ?? streamRef.current
 
     recordStreamRef.current = recordingStream
 
