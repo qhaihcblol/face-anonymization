@@ -33,7 +33,14 @@ export type LiveProcessingStats = {
 }
 
 const TICKET_ENDPOINT = '/api/live/ticket'
-const DEFAULT_TARGET_FPS = 15
+// Upper bound on how many frames/sec we *send*. This is only a ceiling: the real
+// rate self-regulates to the server's render speed via `maxInFlight` backpressure
+// (the server renders one frame per connection serially, so a single stream tops
+// out near 1000/process_ms ≈ 20-33 FPS at ~30-50ms/frame). Keep this at or above
+// that ceiling so the client never throttles below what the engine can deliver;
+// 30 is the sweet spot for smooth-to-the-eye output without spending GPU/bandwidth
+// chasing frames past the refresh humans notice.
+const DEFAULT_TARGET_FPS = 30
 const DEFAULT_SEND_MAX_WIDTH = 640
 const DEFAULT_JPEG_QUALITY = 0.7
 // How many frames may be "in flight" (sent, awaiting their response) at once.
