@@ -116,8 +116,8 @@ def _collect_samples(
             bbox = anonymizer._valid_bbox(img, {"bbox": list(det.bbox)})
             if bbox is None:
                 continue
-            ellipse = anonymizer._ellipse_face_mask(bbox, shape, anonymizer.params)
             lms = det.landmarks.as_array()
+            ellipse = anonymizer._ellipse_face_mask(bbox, shape, anonymizer.params, lms)
             parser = anonymizer._parser_face_mask(img, lms, bbox, shape)
             parser_ok = parser is not None
             if parser is None:

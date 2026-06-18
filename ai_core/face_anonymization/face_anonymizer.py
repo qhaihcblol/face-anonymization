@@ -165,20 +165,109 @@ class FaceAnonymizer:
             return None
         return points
 
+    @staticmethod
+    def _bbox_ellipse_geometry(
+        bbox: tuple[int, int, int, int],
+    ) -> tuple[tuple[int, int], tuple[int, int], float]:
+        """Fallback ellipse geometry that stays centered on the current bbox."""
+        x1, y1, x2, y2 = bbox
+        width = max(x2 - x1, 1)
+        height = max(y2 - y1, 1)
+        center = (int(round((x1 + x2) * 0.5)), int(round((y1 + y2) * 0.5)))
+        axes = (max(int(round(width * 0.5)), 1), max(int(round(height * 0.5)), 1))
+        return center, axes, 0.0
+
+    @staticmethod
+    def _landmark_ellipse_geometry(
+        bbox: tuple[int, int, int, int],
+        landmarks: np.ndarray | None,
+    ) -> tuple[tuple[int, int], tuple[int, int], float] | None:
+        """Estimate a face ellipse from five RetinaFace landmarks.
+
+        The eye line supplies rotation; eyes, nose, and mouth supply a soft center
+        and scale. The current tracker bbox still clamps the result so stale
+        landmarks on predict-only live frames cannot drag the mask away from the
+        face.
+        """
+        if landmarks is None:
+            return None
+
+        points = np.asarray(landmarks, dtype=np.float32)
+        if points.shape != (5, 2) or not np.isfinite(points).all():
+            return None
+
+        x1, y1, x2, y2 = bbox
+        width = max(float(x2 - x1), 1.0)
+        height = max(float(y2 - y1), 1.0)
+
+        pad_x = width * 0.25
+        pad_y = height * 0.25
+        if (
+            np.any(points[:, 0] < float(x1) - pad_x)
+            or np.any(points[:, 0] > float(x2) + pad_x)
+            or np.any(points[:, 1] < float(y1) - pad_y)
+            or np.any(points[:, 1] > float(y2) + pad_y)
+        ):
+            return None
+
+        left_eye, right_eye, nose, left_mouth, right_mouth = points
+        eye_vec = right_eye - left_eye
+        eye_dist = float(np.linalg.norm(eye_vec))
+        if eye_dist < max(4.0, width * 0.08) or eye_dist > width * 0.95:
+            return None
+
+        eye_mid = (left_eye + right_eye) * 0.5
+        mouth_mid = (left_mouth + right_mouth) * 0.5
+        mouth_vec = right_mouth - left_mouth
+        mouth_width = float(np.linalg.norm(mouth_vec))
+
+        eye_unit = eye_vec / eye_dist
+        vertical_unit = np.asarray([-eye_unit[1], eye_unit[0]], dtype=np.float32)
+        if float(np.dot(mouth_mid - eye_mid, vertical_unit)) < 0.0:
+            vertical_unit *= -1.0
+        eye_to_mouth = abs(float(np.dot(mouth_mid - eye_mid, vertical_unit)))
+        if eye_to_mouth < max(4.0, height * 0.10) or eye_to_mouth > height * 0.90:
+            return None
+
+        bbox_center = np.asarray(
+            [(x1 + x2) * 0.5, (y1 + y2) * 0.5],
+            dtype=np.float32,
+        )
+        landmark_center = eye_mid * 0.36 + nose * 0.28 + mouth_mid * 0.36
+        center = bbox_center * 0.65 + landmark_center * 0.35
+        max_shift = np.asarray([width * 0.10, height * 0.10], dtype=np.float32)
+        center = np.clip(center, bbox_center - max_shift, bbox_center + max_shift)
+
+        axis_x_est = max(eye_dist * 1.18, mouth_width * 1.65, width * 0.44)
+        axis_y_est = max(eye_to_mouth * 1.55, height * 0.48)
+        axis_x = int(round(float(np.clip(axis_x_est, width * 0.40, width * 0.50))))
+        axis_y = int(round(float(np.clip(axis_y_est, height * 0.46, height * 0.50))))
+        angle = float(np.degrees(np.arctan2(float(eye_vec[1]), float(eye_vec[0]))))
+
+        return (
+            (int(round(float(center[0]))), int(round(float(center[1])))),
+            (max(axis_x, 1), max(axis_y, 1)),
+            angle,
+        )
+
     def _ellipse_face_mask(
         self,
         bbox: tuple[int, int, int, int],
         shape: tuple[int, int],
         params: ObfuscationParams,
+        landmarks: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Soft elliptical mask (float32 [0, 1]) for one bbox — the coarse fallback."""
-        x1, y1, x2, y2 = bbox
+        """Soft elliptical mask (float32 [0, 1]) for one face.
+
+        When five landmarks are available, the ellipse follows the face pose instead
+        of being only bbox-centered. If landmarks are absent or implausible, use the
+        tighter bbox fallback.
+        """
         mask = np.zeros(shape, dtype=np.float32)
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        axis_x = max((x2 - x1) // 2, 1)
-        axis_y = max(int((y2 - y1) * 0.58), 1)
-        cv2.ellipse(mask, (cx, cy), (axis_x, axis_y), 0, 0, 360, 1.0, -1)
+        center, axes, angle = self._landmark_ellipse_geometry(
+            bbox, landmarks
+        ) or self._bbox_ellipse_geometry(bbox)
+        cv2.ellipse(mask, center, axes, angle, 0, 360, 1.0, -1)
         if params.mask_feather > 0.0:
             mask = cv2.GaussianBlur(mask, (0, 0), params.mask_feather)
         return mask
@@ -259,13 +348,18 @@ class FaceAnonymizer:
             if bbox is None:
                 continue
 
+            landmarks = self._landmarks_from(det)
             face_mask: np.ndarray | None = None
             if params.mask_shape is MaskShape.PARSER:
-                landmarks = self._landmarks_from(det)
                 if landmarks is not None:
                     face_mask = self._parser_face_mask(image, landmarks, bbox, shape)
             if face_mask is None:
-                face_mask = self._ellipse_face_mask(bbox, shape, params)
+                face_mask = self._ellipse_face_mask(
+                    bbox,
+                    shape,
+                    params,
+                    landmarks,
+                )
             mask = np.maximum(mask, face_mask)
         return mask
 
