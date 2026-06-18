@@ -45,12 +45,16 @@ const DEFAULT_SEND_MAX_WIDTH = 640
 const DEFAULT_JPEG_QUALITY = 0.7
 // How many frames may be "in flight" (sent, awaiting their response) at once.
 // 1 = strict request/response: throughput collapses to 1000/round-trip, so on a
-// high-latency link (tunnel/port-forward ~400ms) it caps at ~2-3 FPS even though
-// the server renders in ~42ms. Allowing a few overlapping frames hides that latency
-// (throughput -> min(targetFps, depth*1000/RTT, server rate)) at the cost of the
-// preview lagging real time by ~depth*RTT. The server still renders serially in
-// order, so binary/JSON pairs stay correctly interleaved.
-const DEFAULT_MAX_IN_FLIGHT = 4
+// high-latency link (deployed backend reached over the internet, ~190ms round-trip)
+// it caps at ~5 FPS even though the GPU renders in ~40ms. Allowing several
+// overlapping frames hides that latency: throughput -> min(targetFps, depth/RTT,
+// server rate). At ~190ms round-trip, depth 8 covers the 30 FPS ceiling
+// (30 * 0.19s ≈ 6 frames need to be in flight), with headroom for RTT jitter so a
+// network hiccup doesn't stall the stream. The targetFps throttle still caps the
+// send rate, so depth is an upper bound — in-flight settles near rate*RTT and the
+// preview lags real time by ~that many frames (≈190ms here), not the full depth.
+// The server renders serially in order, so binary/JSON pairs stay interleaved.
+const DEFAULT_MAX_IN_FLIGHT = 8
 
 const EMPTY_STATS: LiveProcessingStats = {
   fps: 0,
