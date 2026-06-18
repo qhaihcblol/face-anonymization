@@ -54,7 +54,7 @@ const DEFAULT_JPEG_QUALITY = 0.7
 // send rate, so depth is an upper bound — in-flight settles near rate*RTT and the
 // preview lags real time by ~that many frames (≈190ms here), not the full depth.
 // The server renders serially in order, so binary/JSON pairs stay interleaved.
-const DEFAULT_MAX_IN_FLIGHT = 8
+const DEFAULT_MAX_IN_FLIGHT = 2
 
 const EMPTY_STATS: LiveProcessingStats = {
   fps: 0,
